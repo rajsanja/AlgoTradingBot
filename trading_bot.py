@@ -661,6 +661,15 @@ def manage_active_trades(active_trades, daily_loss_ref):
 
 def bot_loop():
     print(f"Starting SMC Trading Bot. Monitoring: {', '.join(SYMBOLS)}")
+    
+    # Launch Live Web Dashboard in a background daemon thread
+    try:
+        from web_dashboard import start_dashboard_thread
+        start_dashboard_thread(port=5050)
+        print("🌐 [LIVE WEB DASHBOARD] Running at http://localhost:5050 (Interactive Charts, Real-Time PnL & Cloud Orders)\n")
+    except Exception:
+        pass
+
     daily_loss = 0.0
     current_day = pd.Timestamp.now().day
     
@@ -872,10 +881,7 @@ def bot_loop():
                     time.sleep(min(30.0, remaining))
                     daily_loss = manage_active_trades(active_trades, daily_loss)
                     monitor_ticks += 1
-                    
-                    # Refresh portfolio dashboard every 2 minutes (4 ticks) so all active trades are visibly tracked
-                    if monitor_ticks % 4 == 0 and any(t is not None for t in active_trades.values()):
-                        print_portfolio_dashboard(active_trades)
+                    # Quietly monitors positions every 30s without cluttering the console output
                     
                     # If all trades were closed, wait out the remaining candle time
                     if not any(t is not None for t in active_trades.values()):

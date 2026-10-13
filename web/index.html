@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SMC AlgoTradingBot | Live Institutional Terminal</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+  <!-- TradingView Lightweight Charts -->
+  <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+</head>
+<body>
+  <div class="app-layout">
+    <!-- Top Navigation Header -->
+    <header class="app-header">
+      <div class="header-left">
+        <div class="brand-logo">
+          <div class="logo-icon">⚡</div>
+          <div class="logo-text">
+            <span class="logo-title">SMC TERMINAL</span>
+            <span class="logo-subtitle">Binance USDⓈ-M & TradFi Perpetuals</span>
+          </div>
+        </div>
+        <div class="connection-status">
+          <span class="status-dot pulsing"></span>
+          <span class="status-label">BINANCE TESTNET LIVE</span>
+        </div>
+      </div>
+
+      <div class="header-right">
+        <div class="metric-chip">
+          <span class="chip-label">BALANCE</span>
+          <span class="chip-value mono" id="hdr-balance">$0.00</span>
+        </div>
+
+        <div class="metric-chip pnl-chip" id="hdr-pnl-chip">
+          <span class="chip-label">UNREALIZED PnL</span>
+          <span class="chip-value mono" id="hdr-pnl">$0.00 (+0.00%)</span>
+        </div>
+
+        <div class="cloud-guard-badge" title="Native Server-Side Orders are Active on Binance Cloud 24/7. Safe to close your PC!">
+          <span class="cloud-icon">☁️</span>
+          <span class="cloud-text">CLOUD SL/TP ACTIVE</span>
+        </div>
+
+        <button class="btn-icon" id="btn-refresh" title="Refresh Dashboard Now">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/>
+          </svg>
+        </button>
+      </div>
+    </header>
+
+    <!-- Top Stats Overview -->
+    <section class="stats-overview">
+      <div class="stat-card">
+        <div class="stat-header">
+          <span class="stat-title">TOTAL EQUITY</span>
+          <span class="stat-icon">💰</span>
+        </div>
+        <div class="stat-value mono" id="stat-equity">$0.00</div>
+        <div class="stat-footnote">Wallet Balance + Unrealized PnL</div>
+      </div>
+
+      <div class="stat-card">
+        <div class="stat-header">
+          <span class="stat-title">ACTIVE POSITIONS</span>
+          <span class="stat-icon">📊</span>
+        </div>
+        <div class="stat-value mono" id="stat-positions-count">0 / 2</div>
+        <div class="progress-bar-bg">
+          <div class="progress-bar-fill" id="stat-positions-bar" style="width: 0%;"></div>
+        </div>
+      </div>
+
+      <div class="stat-card">
+        <div class="stat-header">
+          <span class="stat-title">PORTFOLIO RISK ALLOCATION</span>
+          <span class="stat-icon">🛡️</span>
+        </div>
+        <div class="stat-value mono" id="stat-risk">1% / Trade (3% Daily Max)</div>
+        <div class="stat-footnote text-success">Within Safe Institutional Limits</div>
+      </div>
+
+      <div class="stat-card">
+        <div class="stat-header">
+          <span class="stat-title">PC SHUTDOWN SAFETY</span>
+          <span class="stat-icon">⚡</span>
+        </div>
+        <div class="stat-value text-cyan">100% CLOUD PROTECTED</div>
+        <div class="stat-footnote">Binance auto-executes SL/TP 24/7</div>
+      </div>
+    </section>
+
+    <!-- Main Workspace: Chart on Left, Positions on Right -->
+    <main class="main-content">
+      <!-- Left Column: Interactive Candlestick Chart -->
+      <section class="chart-section">
+        <div class="chart-header">
+          <!-- Symbol Selector Tabs -->
+          <div class="symbol-tabs" id="symbol-tabs">
+            <!-- Dynamically populated via app.js -->
+          </div>
+
+          <!-- Timeframe & Chart Controls -->
+          <div class="chart-controls">
+            <div class="timeframe-group">
+              <button class="tf-btn active" data-tf="1h">1H Trigger</button>
+              <button class="tf-btn" data-tf="4h">4H Structure</button>
+            </div>
+            <div class="chart-legend-chips">
+              <span class="legend-chip chip-entry">● Entry</span>
+              <span class="legend-chip chip-tp">● Take Profit</span>
+              <span class="legend-chip chip-sl">● Stop Loss</span>
+              <span class="legend-chip chip-sr">● 4H S/R</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- The Lightweight Charts Canvas Container -->
+        <div class="chart-wrapper">
+          <div id="tv-chart" class="chart-container"></div>
+          <div id="chart-watermark" class="chart-watermark">BTC/USDT 1H</div>
+          <div id="chart-loading" class="chart-loading-overlay">
+            <div class="spinner"></div>
+            <span>Loading Candlesticks & 4H Levels...</span>
+          </div>
+        </div>
+
+        <!-- 4H Market Structure Analysis Grid -->
+        <div class="structure-card">
+          <div class="structure-card-header">
+            <div class="struct-title-group">
+              <span class="struct-icon">📐</span>
+              <span class="struct-title">4H MARKET STRUCTURE & SMC LEVELS</span>
+              <span class="struct-symbol" id="struct-symbol-badge">BTC/USDT</span>
+            </div>
+            <div class="struct-bias-badge" id="struct-bias-badge">NEUTRAL</div>
+          </div>
+
+          <div class="structure-grid">
+            <div class="struct-item">
+              <span class="struct-label">4H 20 EMA Bias</span>
+              <span class="struct-val mono" id="struct-ema20">-</span>
+            </div>
+            <div class="struct-item">
+              <span class="struct-label">Key 4H Support (Floor)</span>
+              <span class="struct-val mono text-success" id="struct-support">-</span>
+            </div>
+            <div class="struct-item">
+              <span class="struct-label">Major Swing Low (SSL)</span>
+              <span class="struct-val mono" id="struct-ssl">-</span>
+            </div>
+            <div class="struct-item">
+              <span class="struct-label">Key 4H Resistance (Ceiling)</span>
+              <span class="struct-val mono text-danger" id="struct-resistance">-</span>
+            </div>
+            <div class="struct-item">
+              <span class="struct-label">Major Swing High (BSL)</span>
+              <span class="struct-val mono" id="struct-bsl">-</span>
+            </div>
+            <div class="struct-item">
+              <span class="struct-label">4H Order Block</span>
+              <span class="struct-val mono" id="struct-ob">None</span>
+            </div>
+            <div class="struct-item">
+              <span class="struct-label">1H Fair Value Gap (FVG)</span>
+              <span class="struct-val mono" id="struct-fvg">None</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Right Column: Live Positions Drawer -->
+      <aside class="positions-section">
+        <div class="positions-header">
+          <div class="pos-title-group">
+            <span class="pos-icon">💼</span>
+            <span class="pos-title">LIVE RUNNING POSITIONS</span>
+          </div>
+          <span class="pos-counter-badge" id="pos-counter-badge">0 OPEN</span>
+        </div>
+
+        <!-- Live Positions Cards Container -->
+        <div class="positions-list" id="positions-list">
+          <!-- Dynamically populated via app.js -->
+        </div>
+
+        <!-- Watchlist Quick Overview -->
+        <div class="watchlist-card">
+          <div class="watchlist-header">
+            <span>MONITORED INSTRUMENTS</span>
+            <span class="text-muted text-sm">Real-time Ticker</span>
+          </div>
+          <div class="watchlist-list" id="watchlist-list">
+            <!-- Dynamically populated via app.js -->
+          </div>
+        </div>
+      </aside>
+    </main>
+
+    <!-- Footer -->
+    <footer class="app-footer">
+      <div class="footer-left">
+        <span>SMC Algorithmic Bot v2.4</span>
+        <span class="footer-separator">•</span>
+        <span id="footer-time">UTC: --:--:--</span>
+      </div>
+      <div class="footer-right">
+        <span class="footer-dot green"></span>
+        <span>WebSocket & Cloud Execution Engine Online</span>
+      </div>
+    </footer>
+  </div>
+
+  <!-- Manual Close Position Modal -->
+  <div class="modal-backdrop" id="modal-backdrop">
+    <div class="modal-card">
+      <div class="modal-header">
+        <span class="modal-title">Close Position Confirmation</span>
+        <button class="modal-close-btn" id="modal-btn-cancel-x">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p>Are you sure you want to close your <strong id="modal-pos-name">BTC/USDT</strong> trade immediately with a Market Order?</p>
+        <p class="modal-hint">This will also cancel all active Stop Loss and Take Profit orders on Binance Cloud.</p>
+      </div>
+      <div class="modal-actions">
+        <button class="btn btn-secondary" id="modal-btn-cancel">Cancel</button>
+        <button class="btn btn-danger" id="modal-btn-confirm">Yes, Close Position Now</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
