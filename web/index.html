@@ -129,46 +129,19 @@
           </div>
         </div>
 
-        <!-- 4H Market Structure Analysis Grid -->
-        <div class="structure-card">
-          <div class="structure-card-header">
-            <div class="struct-title-group">
+        <!-- 4H Market Structure Analysis Section for All Running Trades -->
+        <div class="structures-section">
+          <div class="structures-section-header">
+            <div class="struct-main-title">
               <span class="struct-icon">📐</span>
               <span class="struct-title">4H MARKET STRUCTURE & SMC LEVELS</span>
-              <span class="struct-symbol" id="struct-symbol-badge">BTC/USDT</span>
+              <span class="struct-count-badge" id="struct-count-badge">ALL ACTIVE TRADES</span>
             </div>
-            <div class="struct-bias-badge" id="struct-bias-badge">NEUTRAL</div>
+            <div class="struct-note">Institutional multi-timeframe order blocks, FVGs, and liquidity levels</div>
           </div>
 
-          <div class="structure-grid">
-            <div class="struct-item">
-              <span class="struct-label">4H 20 EMA Bias</span>
-              <span class="struct-val mono" id="struct-ema20">-</span>
-            </div>
-            <div class="struct-item">
-              <span class="struct-label">Key 4H Support (Floor)</span>
-              <span class="struct-val mono text-success" id="struct-support">-</span>
-            </div>
-            <div class="struct-item">
-              <span class="struct-label">Major Swing Low (SSL)</span>
-              <span class="struct-val mono" id="struct-ssl">-</span>
-            </div>
-            <div class="struct-item">
-              <span class="struct-label">Key 4H Resistance (Ceiling)</span>
-              <span class="struct-val mono text-danger" id="struct-resistance">-</span>
-            </div>
-            <div class="struct-item">
-              <span class="struct-label">Major Swing High (BSL)</span>
-              <span class="struct-val mono" id="struct-bsl">-</span>
-            </div>
-            <div class="struct-item">
-              <span class="struct-label">4H Order Block</span>
-              <span class="struct-val mono" id="struct-ob">None</span>
-            </div>
-            <div class="struct-item">
-              <span class="struct-label">1H Fair Value Gap (FVG)</span>
-              <span class="struct-val mono" id="struct-fvg">None</span>
-            </div>
+          <div class="structures-container" id="structures-container">
+            <!-- Dynamically populated with individual cards for BTC/USDT, XAU/USDT, etc. -->
           </div>
         </div>
       </section>

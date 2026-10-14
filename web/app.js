@@ -10,6 +10,7 @@ let currentPriceLines = [];
 let activeSymbol = 'BTC/USDT';
 let activeTimeframe = '1h';
 let dashboardData = null;
+let lastKlinesData = null;
 let pollTimer = null;
 let klineTimer = null;
 let positionToClose = null;
@@ -135,12 +136,12 @@ async function fetchStatus(isManual = false) {
     renderPositions(data);
     renderSymbolTabs(data);
     renderWatchlist(data);
+    renderStructureCards(data, lastKlinesData);
 
-    // Initial load or symbol selection
+    // Initial load
     if (isManual) {
-      // If activeSymbol doesn't have an open position but another symbol does, focus on open position!
       const runningPositions = data.positions || [];
-      if (runningPositions.length > 0 && !runningPositions.some(p => p.symbol === activeSymbol)) {
+      if (!activeSymbol && runningPositions.length > 0) {
         activeSymbol = runningPositions[0].symbol;
       }
       fetchKlines(activeSymbol, activeTimeframe, true);
@@ -188,6 +189,22 @@ function renderStats(data) {
 }
 
 /**
+ * Switch Active Chart Symbol
+ */
+function switchActiveChartSymbol(symbol) {
+  if (!symbol) return;
+  activeSymbol = symbol;
+
+  // Update tabs active styling
+  document.querySelectorAll('.sym-tab').forEach(t => {
+    t.classList.toggle('active', t.textContent.includes(symbol));
+  });
+
+  // Fetch candlesticks and update chart + 4H structure cards
+  fetchKlines(activeSymbol, activeTimeframe, true);
+}
+
+/**
  * 6. Render Symbol Switcher Tabs
  */
 function renderSymbolTabs(data) {
@@ -195,20 +212,37 @@ function renderSymbolTabs(data) {
   if (!container) return;
 
   const symbols = data.watchlist || [];
-  container.innerHTML = '';
+  const existingTabs = container.querySelectorAll('.sym-tab');
 
+  // If already rendered with matching count, update in-place without rebuilding DOM
+  if (existingTabs.length === symbols.length) {
+    existingTabs.forEach((tab, idx) => {
+      const item = symbols[idx];
+      const isActive = (item.symbol === activeSymbol);
+      tab.classList.toggle('active', isActive);
+      tab.classList.toggle('running-trade', !!item.is_active);
+      const dot = tab.querySelector('.live-dot');
+      if (item.is_active && !dot) {
+        tab.insertAdjacentHTML('afterbegin', `<span class="live-dot" title="Active Trade Running"></span> `);
+      } else if (!item.is_active && dot) {
+        dot.remove();
+      }
+    });
+    return;
+  }
+
+  // First time build
+  container.innerHTML = '';
   symbols.forEach(item => {
     const tab = document.createElement('button');
-    tab.className = `sym-tab ${item.symbol === activeSymbol ? 'active' : ''} ${item.is_active ? 'running-trade' : ''}`;
+    const isActive = (item.symbol === activeSymbol);
+    tab.className = `sym-tab ${isActive ? 'active' : ''} ${item.is_active ? 'running-trade' : ''}`;
     
-    let liveBadge = item.is_active ? `<span class="live-dot" title="Active Trade Running"></span>` : '';
-    tab.innerHTML = `${liveBadge} ${item.symbol}`;
+    let liveBadge = item.is_active ? `<span class="live-dot" title="Active Trade Running"></span> ` : '';
+    tab.innerHTML = `${liveBadge}${item.symbol}`;
 
     tab.addEventListener('click', () => {
-      document.querySelectorAll('.sym-tab').forEach(t => t.classList.remove('active'));
-      tab.classList.add('active');
-      activeSymbol = item.symbol;
-      fetchKlines(activeSymbol, activeTimeframe, true);
+      switchActiveChartSymbol(item.symbol);
     });
 
     container.appendChild(tab);
@@ -222,7 +256,9 @@ async function fetchKlines(symbol, timeframe, showLoading = true) {
   const loadingOverlay = document.getElementById('chart-loading');
   const watermark = document.getElementById('chart-watermark');
 
-  watermark.textContent = `${symbol} ${timeframe.toUpperCase()}`;
+  if (watermark) {
+    watermark.textContent = `${symbol} ${timeframe.toUpperCase()}`;
+  }
 
   if (showLoading && loadingOverlay) {
     loadingOverlay.classList.add('active');
@@ -233,19 +269,52 @@ async function fetchKlines(symbol, timeframe, showLoading = true) {
     const data = await res.json();
     if (!data.success) return;
 
-    // Render candles
+    lastKlinesData = data;
+
+    // Render candles on chart
     if (candlestickSeries && data.candles && data.candles.length > 0) {
-      candlestickSeries.setData(data.candles);
-      if (showLoading) {
-        chart.timeScale().fitContent();
+      // 1. Remove all old price lines BEFORE changing series data to prevent price scale corruption!
+      if (currentPriceLines && currentPriceLines.length > 0) {
+        currentPriceLines.forEach(line => {
+          try {
+            candlestickSeries.removePriceLine(line);
+          } catch (e) {}
+        });
+        currentPriceLines = [];
       }
+
+      // 2. Clear old candles
+      candlestickSeries.setData([]);
+
+      // 3. Dynamic price precision based on asset magnitude (e.g. BTC vs XAU vs SOL vs ETH)
+      const lastCandle = data.candles[data.candles.length - 1];
+      const samplePrice = lastCandle ? lastCandle.close : 100;
+      const precision = samplePrice < 1 ? 4 : (samplePrice < 10 ? 3 : 2);
+      const minMove = 1 / Math.pow(10, precision);
+
+      candlestickSeries.applyOptions({
+        priceFormat: {
+          type: 'price',
+          precision: precision,
+          minMove: minMove,
+        },
+      });
+
+      // 4. Set new candles
+      candlestickSeries.setData(data.candles);
+
+      // 5. Draw overlay lines (Entry, SL, TP, 4H Support, 4H Resistance) for the active symbol
+      drawPriceOverlays(symbol, data.levels_4h);
+
+      // 6. Force time scale and right price scale autoscale so candles fill the canvas cleanly
+      chart.timeScale().fitContent();
+      chart.priceScale('right').applyOptions({
+        autoScale: true,
+      });
     }
 
-    // Render 4H Structure Panel
-    renderStructurePanel(data.levels_4h, symbol);
-
-    // Draw Price Overlays (Entry, SL, TP, S/R)
-    drawPriceOverlays(symbol, data.levels_4h);
+    // Render 4H Structure Cards for all running trades + active symbol
+    renderStructureCards(dashboardData, data);
   } catch (err) {
     console.error('Error fetching klines:', err);
   } finally {
@@ -259,11 +328,17 @@ async function fetchKlines(symbol, timeframe, showLoading = true) {
  * 8. Draw Overlay Price Lines on Candlestick Chart
  */
 function drawPriceOverlays(symbol, levels_4h) {
-  // Clear old lines
-  currentPriceLines.forEach(line => candlestickSeries.removePriceLine(line));
-  currentPriceLines = [];
+  // Clear any existing lines
+  if (currentPriceLines && currentPriceLines.length > 0) {
+    currentPriceLines.forEach(line => {
+      try {
+        candlestickSeries.removePriceLine(line);
+      } catch (e) {}
+    });
+    currentPriceLines = [];
+  }
 
-  // 1. Check if there is an active trade for this symbol
+  // 1. Check if there is an active running trade for this symbol
   const runningTrade = (dashboardData?.positions || []).find(p => p.symbol === symbol);
 
   if (runningTrade) {
@@ -274,7 +349,7 @@ function drawPriceOverlays(symbol, levels_4h) {
       lineWidth: 2,
       lineStyle: LightweightCharts.LineStyle.Solid,
       axisLabelVisible: true,
-      title: `ENTRY (${runningTrade.side})`
+      title: `ENTRY (${runningTrade.side}) $${runningTrade.entry.toFixed(2)}`
     });
     currentPriceLines.push(entryLine);
 
@@ -285,7 +360,7 @@ function drawPriceOverlays(symbol, levels_4h) {
       lineWidth: 2,
       lineStyle: LightweightCharts.LineStyle.Dashed,
       axisLabelVisible: true,
-      title: 'STOP LOSS'
+      title: `SL $${runningTrade.stop_loss.toFixed(2)}`
     });
     currentPriceLines.push(slLine);
 
@@ -296,7 +371,7 @@ function drawPriceOverlays(symbol, levels_4h) {
       lineWidth: 2,
       lineStyle: LightweightCharts.LineStyle.Dashed,
       axisLabelVisible: true,
-      title: 'TAKE PROFIT'
+      title: `TP $${runningTrade.take_profit.toFixed(2)}`
     });
     currentPriceLines.push(tpLine);
   }
@@ -310,7 +385,7 @@ function drawPriceOverlays(symbol, levels_4h) {
         lineWidth: 1,
         lineStyle: LightweightCharts.LineStyle.Dotted,
         axisLabelVisible: true,
-        title: '4H SUPPORT'
+        title: `4H SUP $${levels_4h.nearest_support.toFixed(2)}`
       });
       currentPriceLines.push(supLine);
     }
@@ -322,7 +397,7 @@ function drawPriceOverlays(symbol, levels_4h) {
         lineWidth: 1,
         lineStyle: LightweightCharts.LineStyle.Dotted,
         axisLabelVisible: true,
-        title: '4H RESISTANCE'
+        title: `4H RES $${levels_4h.nearest_resistance.toFixed(2)}`
       });
       currentPriceLines.push(resLine);
     }
@@ -330,39 +405,209 @@ function drawPriceOverlays(symbol, levels_4h) {
 }
 
 /**
- * 9. Render 4H Structure Panel
+ * 9. Render 4H Structure Cards for All Running Trades + Active Chart Symbol
  */
-function renderStructurePanel(levels, symbol) {
-  document.getElementById('struct-symbol-badge').textContent = symbol;
-  const biasBadge = document.getElementById('struct-bias-badge');
+function renderStructureCards(data, klinesData) {
+  const container = document.getElementById('structures-container');
+  const countBadge = document.getElementById('struct-count-badge');
+  if (!container) return;
 
-  if (!levels) {
-    biasBadge.textContent = 'ANALYZING';
-    biasBadge.className = 'struct-bias-badge';
+  const positions = data?.positions || [];
+  
+  if (countBadge) {
+    countBadge.textContent = `${positions.length} ACTIVE TRADES`;
+  }
+
+  // Collect list of cards to render:
+  // 1. Every open running position (e.g. BTC/USDT and XAU/USDT)
+  // 2. If activeSymbol is NOT among the open positions, append an analysis card for activeSymbol!
+  const cardsList = [];
+
+  positions.forEach(pos => {
+    // If this position is the currently active chart symbol and klinesData has fresh levels, prefer them or fallback to pos.levels_4h
+    const levels = (pos.symbol === activeSymbol && klinesData?.levels_4h) 
+      ? klinesData.levels_4h 
+      : (pos.levels_4h || null);
+
+    cardsList.push({
+      symbol: pos.symbol,
+      isRunningTrade: true,
+      position: pos,
+      levels: levels,
+      isActiveChart: (pos.symbol === activeSymbol)
+    });
+  });
+
+  // If currently viewed chart symbol is not in open positions, add it as a scan card
+  const isViewingOpenTrade = positions.some(p => p.symbol === activeSymbol);
+  if (!isViewingOpenTrade && activeSymbol) {
+    cardsList.push({
+      symbol: activeSymbol,
+      isRunningTrade: false,
+      position: null,
+      levels: klinesData?.levels_4h || null,
+      isActiveChart: true
+    });
+  }
+
+  if (cardsList.length === 0) {
+    container.innerHTML = `
+      <div class="empty-positions-state">
+        <div class="empty-icon">📐</div>
+        <div style="font-weight: 600; margin-bottom: 4px;">No Active Trades Running</div>
+        <div style="font-size: 11px;">Select any symbol from tabs or watchlist above to view 4H market structure.</div>
+      </div>
+    `;
     return;
   }
 
-  const bias = levels.structure_bias || 'NEUTRAL';
-  biasBadge.textContent = bias;
-  biasBadge.className = `struct-bias-badge ${bias.toLowerCase()}`;
+  container.innerHTML = '';
 
-  document.getElementById('struct-ema20').textContent = levels.ema20 ? `$${levels.ema20.toLocaleString('en-US', { minimumFractionDigits: 2 })}` : '-';
-  document.getElementById('struct-support').textContent = levels.nearest_support ? `$${levels.nearest_support.toLocaleString('en-US', { minimumFractionDigits: 2 })}` : '-';
-  document.getElementById('struct-ssl').textContent = levels.major_swing_low ? `$${levels.major_swing_low.toLocaleString('en-US', { minimumFractionDigits: 2 })}` : '-';
-  document.getElementById('struct-resistance').textContent = levels.nearest_resistance ? `$${levels.nearest_resistance.toLocaleString('en-US', { minimumFractionDigits: 2 })}` : '-';
-  document.getElementById('struct-bsl').textContent = levels.major_swing_high ? `$${levels.major_swing_high.toLocaleString('en-US', { minimumFractionDigits: 2 })}` : '-';
+  cardsList.forEach(item => {
+    const levels = item.levels;
+    const isRunning = item.isRunningTrade;
+    const pos = item.position;
+    const isChartActive = item.isActiveChart;
 
-  if (levels.order_block) {
-    document.getElementById('struct-ob').textContent = `${levels.order_block.type.toUpperCase()} [$${levels.order_block.bottom.toFixed(1)}-$${levels.order_block.top.toFixed(1)}]`;
-  } else {
-    document.getElementById('struct-ob').textContent = 'None detected';
-  }
+    const bias = levels?.structure_bias || 'NEUTRAL';
+    const biasClass = bias.toLowerCase();
 
-  if (levels.fvg) {
-    document.getElementById('struct-fvg').textContent = `${levels.fvg.type.toUpperCase()} [$${levels.fvg.bottom.toFixed(1)}-$${levels.fvg.top.toFixed(1)}]`;
-  } else {
-    document.getElementById('struct-fvg').textContent = 'None detected';
-  }
+    const card = document.createElement('div');
+    card.className = `structure-card ${isChartActive ? 'active-chart-card' : ''}`;
+
+    const formatPrice = (val) => {
+      if (val === undefined || val === null || isNaN(val)) return '-';
+      const precision = val < 1 ? 4 : (val < 10 ? 3 : 2);
+      return `$${val.toLocaleString('en-US', { minimumFractionDigits: precision, maximumFractionDigits: precision })}`;
+    };
+
+    let obText = 'None detected';
+    if (levels?.order_block) {
+      obText = `${levels.order_block.type.toUpperCase()} [${formatPrice(levels.order_block.bottom)} - ${formatPrice(levels.order_block.top)}]`;
+    }
+
+    let fvgText = 'None detected';
+    if (levels?.fvg) {
+      fvgText = `${levels.fvg.type.toUpperCase()} [${formatPrice(levels.fvg.bottom)} - ${formatPrice(levels.fvg.top)}]`;
+    }
+
+    let tradeBadgeHtml = '';
+    let cloudSLTPHtml = '';
+
+    if (isRunning && pos) {
+      const isLong = pos.side.toUpperCase() === 'LONG';
+      const sign = pos.pnl_usd >= 0 ? '+' : '';
+      const pnlClass = pos.pnl_usd >= 0 ? 'text-success' : 'text-danger';
+
+      tradeBadgeHtml = `
+        <span class="struct-trade-badge ${isLong ? 'long' : 'short'}">
+          ${isLong ? '🟢' : '🔴'} RUNNING ${pos.side} (${pos.qty}) • <strong class="${pnlClass}">${sign}$${pos.pnl_usd.toFixed(2)} (ROE: ${sign}${pos.pnl_pct.toFixed(2)}%)</strong>
+        </span>
+      `;
+
+      cloudSLTPHtml = `
+        <div class="struct-cloud-box">
+          <div class="cloud-box-header">
+            <span>☁️ Native Binance Cloud Orders:</span>
+            <strong class="text-success">Active 24/7 (R:R ${pos.risk_reward})</strong>
+          </div>
+          <div class="cloud-box-levels">
+            <span>Entry: <strong class="text-cyan mono">${formatPrice(pos.entry)}</strong></span>
+            <span>Stop Loss: <strong class="text-danger mono">${formatPrice(pos.stop_loss)}</strong></span>
+            <span>Take Profit: <strong class="text-success mono">${formatPrice(pos.take_profit)}</strong></span>
+            <span>Liquidation: <strong class="text-muted mono">${formatPrice(pos.liquidation_price)}</strong></span>
+          </div>
+        </div>
+      `;
+    } else {
+      tradeBadgeHtml = `
+        <span class="struct-trade-badge watchlist">
+          🔍 WATCHLIST SCAN (NO POSITION)
+        </span>
+      `;
+    }
+
+    card.innerHTML = `
+      <div class="structure-card-header">
+        <div class="struct-title-left">
+          <div class="struct-symbol-tag">
+            <span class="symbol-name">${item.symbol}</span>
+            ${tradeBadgeHtml}
+          </div>
+        </div>
+
+        <div class="struct-actions-right">
+          <span class="struct-bias-badge ${biasClass}">${bias}</span>
+          <button class="btn-chart-switch ${isChartActive ? 'active' : ''}">
+            ${isChartActive ? '● Viewing Chart' : '📊 View Chart'}
+          </button>
+        </div>
+      </div>
+
+      <div class="structure-grid">
+        <div class="struct-item">
+          <span class="struct-label">4H 20 EMA BIAS</span>
+          <span class="struct-val mono">${formatPrice(levels?.ema20)}</span>
+          <span class="struct-subtext ${levels && levels.current_price >= levels.ema20 ? 'text-success' : 'text-danger'}">
+            ${levels ? (levels.current_price >= levels.ema20 ? '▲ Above 20 EMA (Bullish)' : '▼ Below 20 EMA (Bearish)') : '-'}
+          </span>
+        </div>
+
+        <div class="struct-item">
+          <span class="struct-label">4H 50 EMA TREND</span>
+          <span class="struct-val mono">${formatPrice(levels?.ema50)}</span>
+          <span class="struct-subtext text-muted">Baseline Institutional Trend</span>
+        </div>
+
+        <div class="struct-item highlight-support">
+          <span class="struct-label">KEY 4H SUPPORT (FLOOR)</span>
+          <span class="struct-val mono text-success">${formatPrice(levels?.nearest_support)}</span>
+          <span class="struct-subtext text-success">Institutional Demand Zone</span>
+        </div>
+
+        <div class="struct-item highlight-resistance">
+          <span class="struct-label">KEY 4H RESISTANCE (CEILING)</span>
+          <span class="struct-val mono text-danger">${formatPrice(levels?.nearest_resistance)}</span>
+          <span class="struct-subtext text-danger">Institutional Supply Zone</span>
+        </div>
+
+        <div class="struct-item">
+          <span class="struct-label">MAJOR SWING LOW (SSL)</span>
+          <span class="struct-val mono">${formatPrice(levels?.major_swing_low)}</span>
+          <span class="struct-subtext text-muted">Sell-Side Liquidity Pool</span>
+        </div>
+
+        <div class="struct-item">
+          <span class="struct-label">MAJOR SWING HIGH (BSL)</span>
+          <span class="struct-val mono">${formatPrice(levels?.major_swing_high)}</span>
+          <span class="struct-subtext text-muted">Buy-Side Liquidity Pool</span>
+        </div>
+
+        <div class="struct-item">
+          <span class="struct-label">4H ORDER BLOCK (OB)</span>
+          <span class="struct-val mono text-sm">${obText}</span>
+          <span class="struct-subtext text-muted">Smart Money Mitigation Zone</span>
+        </div>
+
+        <div class="struct-item">
+          <span class="struct-label">FAIR VALUE GAP (FVG)</span>
+          <span class="struct-val mono text-sm">${fvgText}</span>
+          <span class="struct-subtext text-muted">Imbalance Rebalance Target</span>
+        </div>
+      </div>
+
+      ${cloudSLTPHtml}
+    `;
+
+    // Click handler to switch chart
+    card.addEventListener('click', (e) => {
+      if (activeSymbol !== item.symbol) {
+        switchActiveChartSymbol(item.symbol);
+      }
+    });
+
+    container.appendChild(card);
+  });
 }
 
 /**
@@ -411,7 +656,7 @@ function renderPositions(data) {
           <div class="td-label">UNREALIZED PnL</div>
           <div class="pnl-amount mono ${pnlClass}">${sign}$${pos.pnl_usd.toFixed(2)}</div>
         </div>
-        <div class="pnl-percent mono ${pnlClass}">${sign}${pos.pnl_pct.toFixed(2)}%</div>
+        <div class="pnl-percent mono ${pnlClass}">ROE: ${sign}${pos.pnl_pct.toFixed(2)}%</div>
       </div>
 
       <div class="trade-details-grid">
@@ -420,16 +665,16 @@ function renderPositions(data) {
           <span class="td-value mono">${pos.qty}</span>
         </div>
         <div class="trade-detail-cell">
-          <span class="td-label">CURRENT PRICE</span>
-          <span class="td-value mono">$${pos.current_price.toLocaleString('en-US', { minimumFractionDigits: 2 })}</span>
+          <span class="td-label">MARK PRICE (BINANCE PnL)</span>
+          <span class="td-value mono">$${(pos.mark_price || pos.current_price).toLocaleString('en-US', { minimumFractionDigits: 2 })}</span>
         </div>
         <div class="trade-detail-cell">
           <span class="td-label">ENTRY PRICE</span>
           <span class="td-value mono">$${pos.entry.toLocaleString('en-US', { minimumFractionDigits: 2 })}</span>
         </div>
         <div class="trade-detail-cell">
-          <span class="td-label">R:R RATIO</span>
-          <span class="td-value mono">${pos.risk_reward}</span>
+          <span class="td-label">POSITION MARGIN</span>
+          <span class="td-value mono">$${(pos.initial_margin || 0).toFixed(2)} USDT</span>
         </div>
         <div class="trade-detail-cell">
           <span class="td-label">STOP LOSS (SL)</span>
@@ -457,11 +702,7 @@ function renderPositions(data) {
     card.addEventListener('click', (e) => {
       if (e.target.closest('.btn-close-position')) return;
       if (activeSymbol !== pos.symbol) {
-        activeSymbol = pos.symbol;
-        document.querySelectorAll('.sym-tab').forEach(t => {
-          t.classList.toggle('active', t.textContent.includes(pos.symbol));
-        });
-        fetchKlines(activeSymbol, activeTimeframe, true);
+        switchActiveChartSymbol(pos.symbol);
       }
     });
 
@@ -503,11 +744,7 @@ function renderWatchlist(data) {
 
     row.addEventListener('click', () => {
       if (activeSymbol !== item.symbol) {
-        activeSymbol = item.symbol;
-        document.querySelectorAll('.sym-tab').forEach(t => {
-          t.classList.toggle('active', t.textContent.includes(item.symbol));
-        });
-        fetchKlines(activeSymbol, activeTimeframe, true);
+        switchActiveChartSymbol(item.symbol);
       }
     });
 

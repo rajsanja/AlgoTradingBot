@@ -5,6 +5,7 @@ if sys.platform.startswith('win'):
 
 import os
 import json
+import time
 import threading
 import urllib.parse
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
@@ -16,6 +17,7 @@ from dotenv import load_dotenv
 from trading_bot import (
     SYMBOLS,
     MAX_CONCURRENT_TRADES,
+    DEFAULT_LEVERAGE,
     exchange,
     sync_server_time,
     get_4h_levels_and_structure,
@@ -27,6 +29,23 @@ load_dotenv()
 
 PORT = 5050
 WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'web')
+
+# Fast in-memory cache for 4H SMC levels (30 seconds TTL)
+_4h_levels_cache = {}
+
+def get_cached_4h_levels(symbol, ttl_seconds=30):
+    now = time.time()
+    if symbol in _4h_levels_cache:
+        cached_time, val = _4h_levels_cache[symbol]
+        if now - cached_time < ttl_seconds:
+            return val
+    try:
+        val = get_4h_levels_and_structure(symbol)
+        _4h_levels_cache[symbol] = (now, val)
+        return val
+    except Exception as e:
+        print(f"Error getting 4H levels for {symbol}: {e}")
+        return None
 
 def get_dashboard_data():
     """Fetches real-time Binance account status, positions, and cloud orders."""
@@ -63,14 +82,21 @@ def get_dashboard_data():
                 unrealized_pnl = float(pos.get('unRealizedProfit', 0.0))
                 total_pnl_usd += unrealized_pnl
                 
-                # Current Price
+                mark_price = float(pos.get('markPrice', entry_price))
+                leverage = int(pos.get('leverage', 10))
+                
+                # Current Market Last Price
                 try:
                     ticker = exchange.fapiPublicGetTickerPrice({'symbol': raw_sym})
                     current_price = float(ticker['price'])
                 except Exception:
-                    current_price = entry_price
+                    current_price = mark_price
                 
-                pnl_pct = ((current_price - entry_price) / entry_price * 100) if side == 'LONG' else ((entry_price - current_price) / entry_price * 100)
+                # Exact Binance ROE % (Return on Equity) with Leverage
+                # Formula: (Unrealized PnL / Initial Margin) * 100
+                initial_margin = (qty * entry_price) / leverage if leverage > 0 else (qty * entry_price)
+                roe_pct = (unrealized_pnl / initial_margin * 100) if initial_margin > 0 else 0.0
+                raw_price_pct = ((mark_price - entry_price) / entry_price * 100) if side == 'LONG' else ((entry_price - mark_price) / entry_price * 100)
                 
                 # Fetch Active Cloud Algo Orders (SL & TP) on Binance
                 sl_price = None
@@ -104,22 +130,29 @@ def get_dashboard_data():
                 reward = abs(tp_price - entry_price)
                 rr_str = f"1:{reward/risk:.1f}" if risk > 0 else "1:2.0"
                 
+                # Attach 4H institutional SMC market structure
+                levels_4h = get_cached_4h_levels(matching_sym)
+                
                 positions.append({
                     'symbol': matching_sym,
                     'raw_symbol': raw_sym,
                     'side': side,
                     'qty': qty,
                     'entry': entry_price,
+                    'mark_price': mark_price,
                     'current_price': current_price,
+                    'initial_margin': initial_margin,
                     'stop_loss': sl_price,
                     'take_profit': tp_price,
                     'pnl_usd': unrealized_pnl,
-                    'pnl_pct': pnl_pct,
-                    'leverage': int(pos.get('leverage', 10)),
+                    'pnl_pct': roe_pct,  # Matches official Binance ROE %
+                    'raw_price_pct': raw_price_pct,
+                    'leverage': leverage,
                     'liquidation_price': float(pos.get('liquidationPrice', 0)),
                     'risk_reward': rr_str,
                     'cloud_protection': cloud_active,
-                    'algo_orders': algo_orders_list
+                    'algo_orders': algo_orders_list,
+                    'levels_4h': levels_4h
                 })
         
         # 3. Monitored Watchlist Symbols
@@ -151,6 +184,7 @@ def get_dashboard_data():
             'total_pnl_pct': total_pnl_pct,
             'active_count': len(positions),
             'max_trades': MAX_CONCURRENT_TRADES,
+            'default_leverage': DEFAULT_LEVERAGE,
             'positions': positions,
             'watchlist': watchlist,
             'server_time': datetime.now(timezone.utc).isoformat(),
@@ -187,7 +221,7 @@ def get_klines_data(symbol, timeframe='1h', limit=150):
                 formatted_sym = s
                 break
                 
-        levels_4h = get_4h_levels_and_structure(formatted_sym)
+        levels_4h = get_cached_4h_levels(formatted_sym)
         
         return {
             'success': True,
@@ -201,6 +235,12 @@ def get_klines_data(symbol, timeframe='1h', limit=150):
         return {'success': False, 'error': str(e)}
 
 class DashboardRequestHandler(BaseHTTPRequestHandler):
+    def log_message(self, format, *args):
+        # Silence routine polling requests (200 / 304) to keep terminal output clean and quiet
+        if len(args) >= 2 and str(args[1]) in ('200', '304'):
+            return
+        super().log_message(format, *args)
+
     def end_headers(self):
         self.send_header('Access-Control-Allow-Origin', '*')
         self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')

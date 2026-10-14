@@ -497,12 +497,74 @@ body {
   to { transform: rotate(360deg); }
 }
 
-/* 4H Market Structure Card */
+/* 4H Market Structure Analysis Section for All Running Trades */
+.structures-section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 4px;
+}
+
+.structures-section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0 4px;
+}
+
+.struct-main-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.struct-main-title .struct-title {
+  font-size: 13px;
+  font-weight: 800;
+  letter-spacing: 0.5px;
+  color: #ffffff;
+}
+
+.struct-count-badge {
+  background: rgba(56, 189, 248, 0.15);
+  color: var(--color-cyan);
+  border: 1px solid rgba(56, 189, 248, 0.3);
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 12px;
+  letter-spacing: 0.5px;
+}
+
+.struct-note {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.structures-container {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
 .structure-card {
   background: var(--bg-card);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
   padding: 16px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  position: relative;
+}
+
+.structure-card:hover {
+  border-color: rgba(255, 255, 255, 0.18);
+  transform: translateY(-1px);
+}
+
+.structure-card.active-chart-card {
+  border-color: rgba(56, 189, 248, 0.5);
+  box-shadow: 0 0 16px rgba(56, 189, 248, 0.08);
 }
 
 .structure-card-header {
@@ -514,26 +576,78 @@ body {
   border-bottom: 1px solid var(--border-subtle);
 }
 
-.struct-title-group {
+.struct-title-left {
   display: flex;
   align-items: center;
-  gap: 8px;
 }
 
-.struct-title {
-  font-size: 12px;
-  font-weight: 700;
-  letter-spacing: 0.5px;
+.struct-symbol-tag {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.struct-symbol-tag .symbol-name {
+  font-size: 15px;
+  font-weight: 800;
   color: #ffffff;
+  letter-spacing: 0.5px;
 }
 
-.struct-symbol {
-  background: rgba(255, 255, 255, 0.06);
-  padding: 2px 8px;
-  border-radius: 4px;
+.struct-trade-badge {
   font-size: 11px;
-  color: var(--color-cyan);
   font-weight: 600;
+  padding: 3px 8px;
+  border-radius: 6px;
+}
+
+.struct-trade-badge.long {
+  background: rgba(0, 230, 118, 0.12);
+  color: var(--color-green);
+  border: 1px solid rgba(0, 230, 118, 0.25);
+}
+
+.struct-trade-badge.short {
+  background: rgba(255, 51, 102, 0.12);
+  color: var(--color-red);
+  border: 1px solid rgba(255, 51, 102, 0.25);
+}
+
+.struct-trade-badge.watchlist {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-muted);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.struct-actions-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.btn-chart-switch {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.btn-chart-switch:hover {
+  background: rgba(56, 189, 248, 0.15);
+  color: var(--color-cyan);
+  border-color: rgba(56, 189, 248, 0.4);
+}
+
+.btn-chart-switch.active {
+  background: rgba(56, 189, 248, 0.2);
+  color: var(--color-cyan);
+  border-color: var(--color-cyan);
 }
 
 .struct-bias-badge {
@@ -556,6 +670,12 @@ body {
   border: 1px solid rgba(255, 51, 102, 0.3);
 }
 
+.struct-bias-badge.neutral {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-muted);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+}
+
 .structure-grid {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
@@ -566,6 +686,20 @@ body {
   display: flex;
   flex-direction: column;
   gap: 3px;
+}
+
+.struct-item.highlight-support {
+  background: rgba(0, 230, 118, 0.04);
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid rgba(0, 230, 118, 0.12);
+}
+
+.struct-item.highlight-resistance {
+  background: rgba(255, 51, 102, 0.04);
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 51, 102, 0.12);
 }
 
 .struct-label {
@@ -580,6 +714,37 @@ body {
   font-size: 13px;
   font-weight: 600;
   color: var(--text-primary);
+}
+
+.struct-subtext {
+  font-size: 10px;
+  font-weight: 500;
+}
+
+.struct-cloud-box {
+  margin-top: 12px;
+  padding: 10px 14px;
+  background: rgba(56, 189, 248, 0.04);
+  border: 1px solid rgba(56, 189, 248, 0.12);
+  border-radius: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.cloud-box-header {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.cloud-box-levels {
+  display: flex;
+  gap: 20px;
+  font-size: 11px;
+  color: var(--text-muted);
+  flex-wrap: wrap;
 }
 
 /* ==========================================================================

@@ -3,6 +3,10 @@ if sys.platform.startswith('win'):
     sys.stdout.reconfigure(encoding='utf-8', line_buffering=True)
     sys.stderr.reconfigure(encoding='utf-8', line_buffering=True)
 
+# Prevent duplicate module execution when imported by child modules like web_dashboard
+if __name__ == '__main__':
+    sys.modules['trading_bot'] = sys.modules['__main__']
+
 import ccxt
 import pandas as pd
 import pandas_ta as ta
@@ -27,6 +31,7 @@ MACRO_TIMEFRAMES = ['4h', '1d', '1w', '1M']   # Higher Timeframes for Massive Co
 RISK_PER_TRADE = 0.01  # 1% risk per trade
 MAX_DAILY_LOSS = 0.03  # Stop trading if we lose 3% in a day
 MAX_CONCURRENT_TRADES = 2  # Maximum simultaneous open positions allowed across all pairs (Default: 2)
+DEFAULT_LEVERAGE = 10  # Fixed institutional leverage (10x: optimal margin efficiency and safety)
 
 # Binance Testnet API Keys (Loaded from .env file)
 API_KEY = os.getenv('BINANCE_TESTNET_API_KEY')
@@ -75,20 +80,31 @@ def sign_tradfi_agreement():
         pass
     return False
 
-print("Connecting to Binance Testnet (Paper Trading)...")
-sync_diff = sync_server_time()
-if sync_diff is not None:
-    print(f"🕒 Server time synchronized with Binance (Offset: {sync_diff}ms)")
-sign_tradfi_agreement()
-try:
-    account_info = exchange.fapiPrivateV2GetAccount()
-    usdt_balance = 0.0
-    for asset in account_info['assets']:
-        if asset['asset'] == 'USDT':
-            usdt_balance = float(asset['walletBalance'])
-    print(f"✅ API Connected Successfully! Fake USDT Balance: ${usdt_balance:.2f}\n")
-except Exception as e:
-    print(f"❌ API Connection Failed! Please check your .env file. Error: {e}\n")
+_exchange_initialized = False
+
+def init_exchange():
+    global _exchange_initialized
+    if _exchange_initialized:
+        return
+    _exchange_initialized = True
+    
+    print("Connecting to Binance Testnet (Paper Trading)...")
+    sync_diff = sync_server_time()
+    if sync_diff is not None:
+        print(f"🕒 Server time synchronized with Binance (Offset: {sync_diff}ms)")
+    sign_tradfi_agreement()
+    try:
+        account_info = exchange.fapiPrivateV2GetAccount()
+        usdt_balance = 0.0
+        for asset in account_info.get('assets', []):
+            if asset['asset'] == 'USDT':
+                usdt_balance = float(asset['walletBalance'])
+        print(f"✅ API Connected Successfully! Fake USDT Balance: ${usdt_balance:.2f}\n")
+    except Exception as e:
+        print(f"❌ API Connection Failed! Please check your .env file. Error: {e}\n")
+
+# Run connection initialization exactly once
+init_exchange()
 
 def fetch_data(symbol, timeframe, limit=250):
     try:
@@ -351,9 +367,9 @@ def execute_demo_trade(symbol, side, qty):
             print(f"⚠️ Calculated quantity ({quantity_str}) is 0 or too small for {symbol}. Order aborted.")
             return None
 
-        # Set default leverage to 10x
+        # Set fixed institutional leverage (10x)
         try:
-            exchange.fapiPrivatePostLeverage({'symbol': raw_symbol, 'leverage': 10})
+            exchange.fapiPrivatePostLeverage({'symbol': raw_symbol, 'leverage': DEFAULT_LEVERAGE})
         except Exception:
             pass
 
