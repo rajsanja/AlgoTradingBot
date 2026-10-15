@@ -13,7 +13,11 @@ let dashboardData = null;
 let lastKlinesData = null;
 let pollTimer = null;
 let klineTimer = null;
-let positionToClose = null;
+let countdownSeconds = 0;
+let targetScanTimestamp = 0; // Unix epoch target in seconds
+let nextScanLocalStr = '';
+let nextScanUtcStr = '';
+let isBotPaused = false;
 
 // Initialize on DOM Ready
 document.addEventListener('DOMContentLoaded', () => {
@@ -25,9 +29,10 @@ document.addEventListener('DOMContentLoaded', () => {
   pollTimer = setInterval(() => fetchStatus(false), 2500);
   klineTimer = setInterval(() => fetchKlines(activeSymbol, activeTimeframe, false), 12000);
   
-  // Clock update
+  // Clock & Countdown update every 1 second
   updateClock();
   setInterval(updateClock, 1000);
+  setInterval(updateCountdown, 1000);
 });
 
 /**
@@ -103,6 +108,12 @@ function bindEvents() {
     fetchStatus(true);
   });
 
+  // Emergency Pause/Resume Bot Button
+  const pauseBtn = document.getElementById('btn-toggle-pause');
+  if (pauseBtn) {
+    pauseBtn.addEventListener('click', togglePauseBot);
+  }
+
   // Timeframe Buttons
   document.querySelectorAll('.tf-btn').forEach(btn => {
     btn.addEventListener('click', (e) => {
@@ -131,12 +142,27 @@ async function fetchStatus(isManual = false) {
     if (!data.success) return;
 
     dashboardData = data;
+    if (data.next_scan_target_ts) {
+      targetScanTimestamp = data.next_scan_target_ts;
+    } else if (data.next_scan_seconds !== undefined) {
+      targetScanTimestamp = Math.floor(Date.now() / 1000) + data.next_scan_seconds;
+    }
+    countdownSeconds = data.next_scan_seconds !== undefined ? data.next_scan_seconds : countdownSeconds;
+    if (data.next_scan_local_time) nextScanLocalStr = data.next_scan_local_time;
+    if (data.next_scan_utc_time) nextScanUtcStr = data.next_scan_utc_time;
+
+    isBotPaused = !!data.is_paused;
+    updatePauseButtonUI(isBotPaused);
+    updateCountdown();
+
     renderHeader(data);
     renderStats(data);
     renderPositions(data);
     renderSymbolTabs(data);
     renderWatchlist(data);
     renderStructureCards(data, lastKlinesData);
+    renderTradeHistory(data.trade_history || []);
+    renderTerminalFeed(data.recent_events || []);
 
     // Initial load
     if (isManual) {
@@ -172,6 +198,15 @@ function renderHeader(data) {
   } else {
     pnlChip.classList.add('negative');
   }
+
+  // Today's Realized PnL Chip
+  const todayRealizedEl = document.getElementById('hdr-today-realized');
+  if (todayRealizedEl) {
+    const todayPnl = data.today_realized_pnl || 0;
+    const todaySign = todayPnl >= 0 ? '+' : '';
+    todayRealizedEl.textContent = `${todaySign}$${todayPnl.toFixed(2)}`;
+    todayRealizedEl.style.color = todayPnl >= 0 ? 'var(--color-green)' : 'var(--color-red)';
+  }
 }
 
 /**
@@ -186,6 +221,23 @@ function renderStats(data) {
   countEl.textContent = `${data.active_count} / ${data.max_trades} ACTIVE`;
   const pct = (data.active_count / data.max_trades) * 100;
   barEl.style.width = `${Math.min(pct, 100)}%`;
+
+  // Win Rate & Realized Card
+  const winrateEl = document.getElementById('stat-winrate');
+  if (winrateEl) {
+    const totalCount = data.total_trades_count || (data.trade_history ? data.trade_history.length : 0);
+    winrateEl.textContent = `${(data.win_rate || 0).toFixed(1)}% Win Rate (${totalCount} Trades)`;
+  }
+  const todayFootnote = document.getElementById('stat-today-footnote');
+  if (todayFootnote) {
+    const todayPnl = data.today_realized_pnl || 0;
+    const sign = todayPnl >= 0 ? '+' : '';
+    todayFootnote.textContent = `Today: ${sign}$${todayPnl.toFixed(2)}`;
+    todayFootnote.style.color = todayPnl >= 0 ? 'var(--color-green)' : 'var(--color-red)';
+  }
+
+  // Bot Status & Scan Timer initialized via updateCountdown()
+  updateCountdown();
 }
 
 /**
@@ -808,4 +860,209 @@ function updateClock() {
     const now = new Date();
     el.textContent = `Local: ${now.toLocaleTimeString()} | UTC: ${now.toISOString().slice(11, 19)}`;
   }
+}
+
+/**
+ * 14. Countdown Clock Update (Smooth Absolute Millisecond Synchronization)
+ */
+function updateCountdown() {
+  const chipEl = document.getElementById('hdr-countdown');
+  const statEl = document.getElementById('stat-scan-timer');
+  const botStatusEl = document.getElementById('stat-bot-status');
+
+  if (isBotPaused) {
+    if (chipEl) chipEl.textContent = 'PAUSED';
+    if (statEl) {
+      statEl.textContent = 'PAUSED ⏸️';
+      statEl.className = 'stat-value mono text-danger';
+    }
+    if (botStatusEl) {
+      botStatusEl.textContent = 'Trading Paused (No new setups entered)';
+      botStatusEl.className = 'stat-footnote text-danger';
+    }
+    return;
+  }
+
+  const nowSec = Math.floor(Date.now() / 1000);
+  let remaining = targetScanTimestamp > 0 ? (targetScanTimestamp - nowSec) : countdownSeconds;
+
+  if (remaining <= 0) {
+    if (chipEl) chipEl.textContent = 'SCANNING';
+    if (statEl) {
+      statEl.textContent = '⚡ SCANNING NOW';
+      statEl.className = 'stat-value mono text-cyan';
+    }
+    if (botStatusEl) {
+      botStatusEl.textContent = 'Analyzing 1H Candle Close & SMC Patterns...';
+      botStatusEl.className = 'stat-footnote text-cyan';
+    }
+    return;
+  }
+
+  // Format as hours:mins:secs or mins:secs
+  const hours = Math.floor(remaining / 3600);
+  const mins = Math.floor((remaining % 3600) / 60);
+  const secs = remaining % 60;
+
+  const paddedMins = String(mins).padStart(2, '0');
+  const paddedSecs = String(secs).padStart(2, '0');
+  const formattedChip = hours > 0 ? `${hours}:${paddedMins}:${paddedSecs}` : `${paddedMins}:${paddedSecs}`;
+  const formattedStat = hours > 0 ? `${hours}h ${mins}m ${secs}s` : `${mins}m ${secs}s`;
+
+  if (chipEl) {
+    chipEl.textContent = formattedChip;
+    if (nextScanLocalStr) {
+      chipEl.title = `Next 1H candle scan: ${nextScanLocalStr} Local (${nextScanUtcStr || 'UTC'})`;
+    }
+  }
+
+  if (statEl) {
+    statEl.textContent = formattedStat;
+    statEl.className = 'stat-value mono text-cyan';
+  }
+
+  if (botStatusEl) {
+    if (nextScanLocalStr) {
+      botStatusEl.textContent = `Next 1H Close: ${nextScanLocalStr} (${nextScanUtcStr || 'UTC'})`;
+      botStatusEl.className = 'stat-footnote text-success';
+    } else {
+      botStatusEl.textContent = 'Bot Active & Guarding';
+      botStatusEl.className = 'stat-footnote text-success';
+    }
+  }
+}
+
+/**
+ * 15. Emergency Pause / Resume Bot Control
+ */
+async function togglePauseBot() {
+  const btn = document.getElementById('btn-toggle-pause');
+  if (!btn) return;
+  btn.disabled = true;
+
+  try {
+    const res = await fetch('/api/toggle_pause', { method: 'POST' });
+    const data = await res.json();
+    if (data.success) {
+      isBotPaused = data.is_paused;
+      updatePauseButtonUI(isBotPaused);
+      fetchStatus(false);
+    }
+  } catch (err) {
+    console.error('Error toggling bot pause:', err);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function updatePauseButtonUI(paused) {
+  const btn = document.getElementById('btn-toggle-pause');
+  const icon = document.getElementById('pause-btn-icon');
+  const text = document.getElementById('pause-btn-text');
+  if (!btn || !icon || !text) return;
+
+  if (paused) {
+    btn.classList.add('paused');
+    icon.textContent = '▶️';
+    text.textContent = 'RESUME BOT';
+    btn.title = 'Bot execution is PAUSED. Click to resume trading.';
+  } else {
+    btn.classList.remove('paused');
+    icon.textContent = '⏸️';
+    text.textContent = 'PAUSE BOT';
+    btn.title = 'Bot execution is ACTIVE. Click to pause opening new trades.';
+  }
+}
+
+/**
+ * 16. Render Closed Trades History Table
+ */
+function renderTradeHistory(history) {
+  const tbody = document.getElementById('trade-history-tbody');
+  const countBadge = document.getElementById('hist-count-badge');
+  const winrateChip = document.getElementById('hist-summary-winrate');
+  const pnlChip = document.getElementById('hist-summary-pnl');
+  if (!tbody) return;
+
+  if (countBadge) countBadge.textContent = `${history.length} TRADES`;
+
+  if (!history || history.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="10" class="empty-table-state">No closed trades recorded yet. Bot will record entries, exits, and PnL automatically.</td></tr>`;
+    if (winrateChip) winrateChip.textContent = 'Win Rate: 0.0%';
+    if (pnlChip) pnlChip.textContent = 'Total Realized: $0.00';
+    return;
+  }
+
+  // Summary metrics
+  let totalPnl = 0;
+  let winCount = 0;
+  history.forEach(t => {
+    totalPnl += t.pnl_usd || 0;
+    if ((t.pnl_usd || 0) > 0) winCount++;
+  });
+  const winRate = (winCount / history.length) * 100;
+
+  if (winrateChip) winrateChip.textContent = `Win Rate: ${winRate.toFixed(1)}%`;
+  if (pnlChip) {
+    const pnlSign = totalPnl >= 0 ? '+' : '';
+    pnlChip.textContent = `Total Realized: ${pnlSign}$${totalPnl.toFixed(2)}`;
+    pnlChip.style.color = totalPnl >= 0 ? 'var(--color-green)' : 'var(--color-red)';
+  }
+
+  // Render rows
+  tbody.innerHTML = history.map((trade, idx) => {
+    const isLong = trade.side.toUpperCase() === 'LONG' || trade.side.toUpperCase() === 'BUY';
+    const sideBadge = `<span class="${isLong ? 'badge-side-long' : 'badge-side-short'}">${isLong ? 'LONG' : 'SHORT'}</span>`;
+    
+    const pnlUsd = trade.pnl_usd || 0;
+    const pnlPct = trade.pnl_pct || 0;
+    const pnlSign = pnlUsd >= 0 ? '+' : '';
+    const pnlColor = pnlUsd >= 0 ? 'var(--color-green)' : 'var(--color-red)';
+
+    const entryStr = trade.entry ? `$${Number(trade.entry).toLocaleString('en-US', { minimumFractionDigits: 2 })}` : '-';
+    const exitStr = trade.exit ? `$${Number(trade.exit).toLocaleString('en-US', { minimumFractionDigits: 2 })}` : '-';
+
+    return `
+      <tr>
+        <td class="text-muted">#${trade.id || (idx + 1)}</td>
+        <td><strong>${trade.symbol}</strong></td>
+        <td>${sideBadge}</td>
+        <td>${entryStr}</td>
+        <td>${exitStr}</td>
+        <td>${trade.qty}</td>
+        <td style="color: ${pnlColor}; font-weight: 700;">${pnlSign}$${pnlUsd.toFixed(2)}</td>
+        <td style="color: ${pnlColor}; font-weight: 700;">${pnlSign}${pnlPct.toFixed(2)}%</td>
+        <td><span class="badge-reason">${trade.reason || 'Closed'}</span></td>
+        <td class="text-muted text-sm">${trade.closed_at || '-'}</td>
+      </tr>
+    `;
+  }).join('');
+}
+
+/**
+ * 17. Render Live Bot Event Stream Feed
+ */
+function renderTerminalFeed(events) {
+  const container = document.getElementById('terminal-feed');
+  const countEl = document.getElementById('terminal-event-count');
+  if (!container) return;
+
+  if (countEl) countEl.textContent = `${events ? events.length : 0} events`;
+
+  if (!events || events.length === 0) {
+    container.innerHTML = `<div class="terminal-entry text-muted">[System] Live Bot Event Feed online. Monitoring trades & Binance Cloud orders...</div>`;
+    return;
+  }
+
+  container.innerHTML = events.map(evt => {
+    const rawType = (evt.type || 'INFO').toUpperCase();
+    const typeClass = `type-${rawType.toLowerCase()}`;
+    const tagClass = `tag-${rawType.toLowerCase()}`;
+    return `<div class="terminal-entry ${typeClass}"><span class="ts">[${evt.timestamp}]</span><span class="terminal-tag ${tagClass}">${rawType}</span><span class="terminal-msg">${escapeHtml(evt.message)}</span></div>`;
+  }).join('');
+}
+
+function escapeHtml(str) {
+  if (!str) return '';
+  return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }

@@ -7,7 +7,8 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="style.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+  <link rel="stylesheet" href="style.css?v=2.5.0">
   <!-- TradingView Lightweight Charts -->
   <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
 </head>
@@ -39,6 +40,21 @@
           <span class="chip-label">UNREALIZED PnL</span>
           <span class="chip-value mono" id="hdr-pnl">$0.00 (+0.00%)</span>
         </div>
+
+        <div class="metric-chip realized-chip" id="hdr-realized-chip">
+          <span class="chip-label">TODAY REALIZED</span>
+          <span class="chip-value mono" id="hdr-today-realized">$0.00</span>
+        </div>
+
+        <div class="metric-chip countdown-chip" id="hdr-countdown-chip" title="Time remaining until next 1-Hour candle close and market analysis">
+          <span class="chip-label">NEXT SCAN</span>
+          <span class="chip-value mono text-cyan" id="hdr-countdown">--:--</span>
+        </div>
+
+        <button class="btn-toggle-pause" id="btn-toggle-pause" title="Emergency Pause or Resume Bot Trading">
+          <span class="pause-icon" id="pause-btn-icon">⏸️</span>
+          <span id="pause-btn-text">PAUSE BOT</span>
+        </button>
 
         <div class="cloud-guard-badge" title="Native Server-Side Orders are Active on Binance Cloud 24/7. Safe to close your PC!">
           <span class="cloud-icon">☁️</span>
@@ -77,11 +93,20 @@
 
       <div class="stat-card">
         <div class="stat-header">
-          <span class="stat-title">PORTFOLIO RISK ALLOCATION</span>
-          <span class="stat-icon">🛡️</span>
+          <span class="stat-title">WIN RATE & REALIZED</span>
+          <span class="stat-icon">🎯</span>
         </div>
-        <div class="stat-value mono" id="stat-risk">1% / Trade (3% Daily Max)</div>
-        <div class="stat-footnote text-success">Within Safe Institutional Limits</div>
+        <div class="stat-value mono" id="stat-winrate">0.0% Win Rate</div>
+        <div class="stat-footnote text-cyan" id="stat-today-footnote">Today's Realized: $0.00</div>
+      </div>
+
+      <div class="stat-card">
+        <div class="stat-header">
+          <span class="stat-title">NEXT CANDLE SCAN</span>
+          <span class="stat-icon">⏳</span>
+        </div>
+        <div class="stat-value mono text-cyan" id="stat-scan-timer">--m --s</div>
+        <div class="stat-footnote text-success" id="stat-bot-status">Bot Active & Analyzing</div>
       </div>
 
       <div class="stat-card">
@@ -174,6 +199,79 @@
       </aside>
     </main>
 
+    <!-- Bottom Dashboard Panels: Closed Trade History & Live Event Terminal -->
+    <div class="dashboard-bottom-grid">
+      <!-- Closed Trades History Table -->
+      <section class="history-section">
+        <div class="bottom-panel-card">
+          <div class="bottom-panel-header">
+            <div class="panel-title-group">
+              <span class="panel-icon">📜</span>
+              <span class="panel-title">CLOSED TRADES HISTORY</span>
+              <span class="history-counter-badge" id="hist-count-badge">0 TRADES</span>
+            </div>
+            <div class="panel-summary-chips">
+              <span class="summary-chip" id="hist-summary-winrate">Win Rate: 0.0%</span>
+              <span class="summary-chip" id="hist-summary-pnl">Total Realized: $0.00</span>
+            </div>
+          </div>
+
+          <div class="table-responsive">
+            <table class="history-table">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>SYMBOL</th>
+                  <th>SIDE</th>
+                  <th>ENTRY</th>
+                  <th>EXIT</th>
+                  <th>QTY</th>
+                  <th>REALIZED PnL ($)</th>
+                  <th>RETURN (%)</th>
+                  <th>EXIT REASON</th>
+                  <th>CLOSED AT</th>
+                </tr>
+              </thead>
+              <tbody id="trade-history-tbody">
+                <tr>
+                  <td colspan="10" class="empty-table-state">No closed trades recorded yet.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- Live Bot Event Activity Terminal -->
+      <section class="terminal-section">
+        <div class="bottom-panel-card">
+          <div class="bottom-panel-header">
+            <div class="panel-title-group">
+              <span class="panel-icon">🧠</span>
+              <span class="panel-title">LIVE BOT ACTIVITY FEED</span>
+              <span class="live-stream-badge"><span class="pulse-dot"></span> LIVE</span>
+            </div>
+            <span class="text-muted text-sm" id="terminal-event-count">0 events</span>
+          </div>
+
+          <div class="terminal-feed-wrapper">
+            <div class="terminal-feed-topbar">
+              <div class="terminal-dots">
+                <span class="t-dot t-dot-red"></span>
+                <span class="t-dot t-dot-yellow"></span>
+                <span class="t-dot t-dot-green"></span>
+              </div>
+              <div class="terminal-subtext">algo-engine@binance:~$ tail -f live_events.log</div>
+              <div class="terminal-cursor-indicator"><span class="blink-cursor">_</span></div>
+            </div>
+            <div class="terminal-feed" id="terminal-feed">
+              <div class="terminal-entry text-muted">[System] Live Bot Event Feed initialized. Waiting for bot activity...</div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+
     <!-- Footer -->
     <footer class="app-footer">
       <div class="footer-left">
@@ -206,6 +304,6 @@
     </div>
   </div>
 
-  <script src="app.js"></script>
+  <script src="app.js?v=2.5.1"></script>
 </body>
 </html>

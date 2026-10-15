@@ -12,6 +12,7 @@ import pandas as pd
 import pandas_ta as ta
 import time
 import os
+import json
 import hmac
 import hashlib
 import requests
@@ -106,6 +107,134 @@ def init_exchange():
 # Run connection initialization exactly once
 init_exchange()
 
+# ==========================================
+# TRADING STATE & DASHBOARD EVENT LOGGING
+# ==========================================
+HISTORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'trades_history.json')
+recent_bot_events = []
+_bot_paused = False
+
+def log_bot_event(message, event_type="INFO"):
+    """Logs an event to stdout and appends to the dashboard live event feed."""
+    timestamp = datetime.now().strftime('%H:%M:%S')
+    print(f"[{timestamp}] {message}")
+    recent_bot_events.append({
+        'timestamp': timestamp,
+        'message': message,
+        'type': event_type
+    })
+    if len(recent_bot_events) > 100:
+        recent_bot_events.pop(0)
+
+def get_recent_events():
+    return list(reversed(recent_bot_events))
+
+def is_bot_paused():
+    global _bot_paused
+    return _bot_paused
+
+def toggle_bot_pause(pause_state=None):
+    global _bot_paused
+    if pause_state is not None:
+        _bot_paused = bool(pause_state)
+    else:
+        _bot_paused = not _bot_paused
+    status_str = "PAUSED ⏸️ (New entries disabled)" if _bot_paused else "ACTIVE ▶️ (Monitoring & Executing)"
+    log_bot_event(f"Bot trading execution is now {status_str}.", "CONTROL")
+    return _bot_paused
+
+def load_trade_history():
+    if os.path.exists(HISTORY_FILE):
+        try:
+            with open(HISTORY_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception:
+            return []
+    return []
+
+def save_trade_history(history):
+    try:
+        with open(HISTORY_FILE, 'w', encoding='utf-8') as f:
+            json.dump(history, f, indent=2)
+    except Exception as e:
+        print(f"Error saving trade history: {e}")
+
+def record_closed_trade(symbol, side, entry, exit_price, qty, pnl_usd, pnl_pct, reason="Manual"):
+    history = load_trade_history()
+    trade_id = len(history) + 1
+    record = {
+        'id': trade_id,
+        'symbol': symbol,
+        'side': side.upper(),
+        'entry': float(entry),
+        'exit': float(exit_price),
+        'qty': float(qty),
+        'pnl_usd': round(float(pnl_usd), 2),
+        'pnl_pct': round(float(pnl_pct), 2),
+        'reason': reason,
+        'closed_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    }
+    history.insert(0, record)
+    if len(history) > 200:
+        history = history[:200]
+    save_trade_history(history)
+    log_bot_event(f"Recorded trade #{trade_id} ({symbol} {side.upper()}): {reason} | PnL: {'+' if pnl_usd >= 0 else ''}${pnl_usd:,.2f} ({'+' if pnl_pct >= 0 else ''}{pnl_pct:.2f}%)", "TRADE")
+    return record
+
+def is_gold_market_open():
+    """
+    Checks if Binance TradFi Gold Perpetual (XAU/USDT) market is currently open.
+    TradFi Gold closes on weekends (Friday 21:00 UTC to Sunday 22:00 UTC).
+    """
+    now = datetime.now(timezone.utc)
+    weekday = now.weekday()  # 4 = Friday, 5 = Saturday, 6 = Sunday
+    hour = now.hour
+    
+    if weekday == 4 and hour >= 21:
+        return False
+    if weekday == 5:
+        return False
+    if weekday == 6 and hour < 22:
+        return False
+    return True
+
+def get_next_scan_target():
+    """Calculates the absolute target time for the next 1-Hour candle close and scan."""
+    now_utc = datetime.now(timezone.utc)
+    next_hour_utc = (now_utc + timedelta(hours=1)).replace(minute=0, second=5, microsecond=0)
+    seconds_remaining = max(0, int((next_hour_utc - now_utc).total_seconds()))
+    wake_time_local = datetime.now() + timedelta(seconds=seconds_remaining)
+    return {
+        'target_utc_iso': next_hour_utc.isoformat(),
+        'target_timestamp': int(next_hour_utc.timestamp()),
+        'seconds_remaining': seconds_remaining,
+        'target_local_str': wake_time_local.strftime('%I:%M:%S %p'),
+        'target_utc_str': next_hour_utc.strftime('%H:%M:%S UTC')
+    }
+
+def get_next_scan_seconds():
+    return get_next_scan_target()['seconds_remaining']
+
+def get_daily_trend_bias(symbol):
+    """
+    Analyzes Daily (1D) macro timeframe to determine institutional macro trend bias.
+    Ensures bot only trades in the direction of the daily 50-EMA trend.
+    """
+    try:
+        df_1d = fetch_data(symbol, '1d', limit=60)
+        if df_1d is None or len(df_1d) < 20:
+            return 'NEUTRAL'
+        
+        df_1d['ema50'] = df_1d['close'].ewm(span=50, adjust=False).mean()
+        completed_daily = df_1d.iloc[-2] if len(df_1d) > 2 else df_1d.iloc[-1]
+        
+        if completed_daily['close'] >= completed_daily['ema50']:
+            return 'BULLISH'
+        else:
+            return 'BEARISH'
+    except Exception:
+        return 'NEUTRAL'
+
 def fetch_data(symbol, timeframe, limit=250):
     try:
         raw_symbol = symbol.replace('/', '')
@@ -124,22 +253,82 @@ def fetch_data(symbol, timeframe, limit=250):
         print(f"Error fetching data for {symbol}: {e}")
         return None
 
-def detect_fvg(df):
+def get_quantity_precision(symbol):
+    """Returns valid decimal precision for each symbol on Binance Futures."""
+    if 'BTC' in symbol:
+        return 3
+    elif 'ETH' in symbol:
+        return 2
+    elif 'BNB' in symbol:
+        return 2
+    elif 'SOL' in symbol:
+        return 2
+    elif 'XAU' in symbol:
+        return 3
+    return 2
+
+def detect_fvg(df, lookback=8):
     """
-    Detects Fair Value Gaps (FVG) in the last 3 candles.
-    Bullish FVG: Low of candle 3 is higher than High of candle 1
-    Bearish FVG: High of candle 3 is lower than Low of candle 1
+    Detects the most recent 1H Fair Value Gap (FVG) within lookback candles,
+    and checks if price has retraced/mitigated into the institutional discount zone.
+    Bullish FVG: Low of candle 3 is higher than High of candle 1.
+    Bearish FVG: High of candle 3 is lower than Low of candle 1.
     """
-    if len(df) < 3:
+    if len(df) < 5:
         return None
 
-    c1 = df.iloc[-3]
-    c3 = df.iloc[-1]
-
-    if c3['low'] > c1['high']:
-        return {'type': 'bullish', 'top': c3['low'], 'bottom': c1['high']}
-    elif c3['high'] < c1['low']:
-        return {'type': 'bearish', 'top': c1['low'], 'bottom': c3['high']}
+    current_price = float(df.iloc[-1]['close'])
+    
+    # Scan recent candles for active valid FVG
+    for i in range(len(df) - 1, max(2, len(df) - lookback), -1):
+        c1 = df.iloc[i-2]
+        c3 = df.iloc[i]
+        
+        # Bullish FVG
+        if c3['low'] > c1['high']:
+            bottom = float(c1['high'])
+            top = float(c3['low'])
+            ce = (top + bottom) / 2.0
+            
+            # Check if invalidated: any subsequent candle closed below bottom
+            subsequent = df.iloc[i:]
+            if any(float(row['close']) < bottom for _, row in subsequent.iterrows()):
+                continue
+            
+            # In zone or retested
+            in_zone = (current_price <= top * 1.002) and (current_price >= bottom * 0.998)
+            retested = any(float(row['low']) <= top and float(row['low']) >= bottom for _, row in subsequent.iterrows())
+            
+            return {
+                'type': 'bullish',
+                'top': top,
+                'bottom': bottom,
+                'ce': ce,
+                'in_zone': in_zone,
+                'retested': retested or in_zone
+            }
+        
+        # Bearish FVG
+        elif c3['high'] < c1['low']:
+            top = float(c1['low'])
+            bottom = float(c3['high'])
+            ce = (top + bottom) / 2.0
+            
+            subsequent = df.iloc[i:]
+            if any(float(row['close']) > top for _, row in subsequent.iterrows()):
+                continue
+            
+            in_zone = (current_price >= bottom * 0.998) and (current_price <= top * 1.002)
+            retested = any(float(row['high']) >= bottom and float(row['high']) <= top for _, row in subsequent.iterrows())
+            
+            return {
+                'type': 'bearish',
+                'top': top,
+                'bottom': bottom,
+                'ce': ce,
+                'in_zone': in_zone,
+                'retested': retested or in_zone
+            }
     
     return None
 
@@ -157,7 +346,8 @@ def calculate_quantity(entry_price, stop_loss_price, capital, risk_pct, symbol='
     if (quantity * entry_price) < min_notional:
         quantity = (min_notional * 1.05) / entry_price
         
-    return round(quantity, 5)
+    qty_prec = get_quantity_precision(symbol)
+    return round(quantity, qty_prec)
 
 def detect_order_block_4h(df_4h):
     """
@@ -338,20 +528,6 @@ def calculate_4h_level_sl_tp(levels_4h, entry_price, side, fvg_1h=None):
         rr_ratio = round((entry_price - take_profit) / risk, 2)
         return stop_loss, take_profit, rr_ratio, resistance_level, levels_4h['nearest_support']
 
-def get_quantity_precision(symbol):
-    """Returns valid decimal precision for each symbol on Binance Futures."""
-    if 'BTC' in symbol:
-        return 3
-    elif 'ETH' in symbol:
-        return 2
-    elif 'BNB' in symbol:
-        return 2
-    elif 'SOL' in symbol:
-        return 2
-    elif 'XAU' in symbol:
-        return 3
-    return 2
-
 def execute_demo_trade(symbol, side, qty):
     """
     Executes a demo order directly on Binance Futures Testnet,
@@ -508,51 +684,109 @@ def place_server_sl_tp(symbol, side, stop_loss, take_profit):
         print(f"⚠️ Failed to place server-side SL/TP for {symbol} on Binance: {e}")
         return None, None
 
-def sync_active_positions(active_trades):
+def sync_active_positions(active_trades, retries=2):
     """
     Syncs in-memory active_trades two-way with live Binance Futures positions.
     1. If Binance has an open position (amt != 0) not yet in active_trades, registers it.
-       Ensures server-side SL and TP orders are active on Binance Cloud.
+       Restores exact Stop Loss and Take Profit trigger prices from Binance Cloud Orders.
+       If orders are missing, derives them safely from 4H structure and deploys them.
     2. If Binance shows amt == 0 for a symbol previously in active_trades, clears it and cancels any leftover algo orders.
+    Includes automatic retry and clock offset auto-sync on transient network drops.
     """
-    try:
-        positions = exchange.fapiPrivateV2GetPositionRisk()
-        live_positions = {pos['symbol']: pos for pos in positions}
-        for sym in SYMBOLS:
-            sym_raw = sym.replace('/', '')
-            pos = live_positions.get(sym_raw)
-            if pos:
-                amt = float(pos['positionAmt'])
-                if amt != 0:
-                    entry = float(pos['entryPrice'])
-                    side = 'long' if amt > 0 else 'short'
-                    qty = abs(amt)
-                    if active_trades[sym] is None:
-                        active_trades[sym] = {
-                            'side': side,
-                            'entry': entry,
-                            'stop_loss': entry * 0.99 if side == 'long' else entry * 1.01,
-                            'take_profit': entry * 1.02 if side == 'long' else entry * 0.98,
-                            'qty': qty,
-                            'breakeven_triggered': False
-                        }
-                        print(f"📦 Synced open position from Binance for {sym} ({side.upper()} {qty} @ ${entry:,.2f}). Managing it now.")
-                    
-                    # Ensure Native Server-Side SL/TP exists on Binance Cloud
-                    try:
-                        open_algos = exchange.fapiPrivateGetOpenAlgoOrders({'symbol': sym_raw})
+    for attempt in range(retries):
+        try:
+            positions = exchange.fapiPrivateV2GetPositionRisk()
+            live_positions = {pos['symbol']: pos for pos in positions}
+            for sym in SYMBOLS:
+                sym_raw = sym.replace('/', '')
+                pos = live_positions.get(sym_raw)
+                if pos:
+                    amt = float(pos['positionAmt'])
+                    if amt != 0:
+                        entry = float(pos['entryPrice'])
+                        side = 'long' if amt > 0 else 'short'
+                        qty = abs(amt)
+                        
+                        # Fetch existing conditional orders from Binance Cloud
+                        open_sl = None
+                        open_tp = None
+                        open_algos = []
+                        try:
+                            open_algos = exchange.fapiPrivateGetOpenAlgoOrders({'symbol': sym_raw})
+                            if open_algos:
+                                for algo in open_algos:
+                                    atype = str(algo.get('orderType') or algo.get('type') or '').upper()
+                                    trigger_px = float(algo.get('triggerPrice') or algo.get('stopPrice') or 0.0)
+                                    if 'STOP' in atype and trigger_px > 0:
+                                        open_sl = trigger_px
+                                    elif 'PROFIT' in atype and trigger_px > 0:
+                                        open_tp = trigger_px
+                        except Exception:
+                            pass
+                        
+                        if active_trades[sym] is None:
+                            # If SL/TP not found in open orders, calculate institutional levels from 4H structure
+                            if open_sl is None or open_tp is None:
+                                try:
+                                    levels_4h = get_4h_levels_and_structure(sym)
+                                    if levels_4h:
+                                        calc_sl, calc_tp, _, _, _ = calculate_4h_level_sl_tp(levels_4h, entry, side)
+                                        open_sl = open_sl or calc_sl
+                                        open_tp = open_tp or calc_tp
+                                except Exception:
+                                    pass
+                                
+                                # Fallback if 4H calculation fails
+                                if open_sl is None:
+                                    open_sl = entry * 0.985 if side == 'long' else entry * 1.015
+                                if open_tp is None:
+                                    open_tp = entry * 1.03 if side == 'long' else entry * 0.97
+                            
+                            is_be = False
+                            if side == 'long' and open_sl >= entry:
+                                is_be = True
+                            elif side == 'short' and open_sl <= entry:
+                                is_be = True
+
+                            active_trades[sym] = {
+                                'side': side,
+                                'entry': entry,
+                                'stop_loss': open_sl,
+                                'take_profit': open_tp,
+                                'qty': qty,
+                                'breakeven_triggered': is_be
+                            }
+                            print(f"📦 Synced open position from Binance for {sym} ({side.upper()} {qty} @ ${entry:,.2f} | SL: ${open_sl:,.2f} | TP: ${open_tp:,.2f}). Managing it now.")
+                        else:
+                            # Keep existing trade SL/TP updated if Binance Cloud orders changed (e.g. breakeven moved)
+                            if open_sl is not None:
+                                active_trades[sym]['stop_loss'] = open_sl
+                            if open_tp is not None:
+                                active_trades[sym]['take_profit'] = open_tp
+                        
+                        # Ensure Native Server-Side SL/TP exists on Binance Cloud (must have both SL and TP)
                         if not open_algos or len(open_algos) < 2:
                             trade = active_trades[sym]
                             place_server_sl_tp(sym, trade['side'], trade['stop_loss'], trade['take_profit'])
-                    except Exception:
-                        pass
-                else:
-                    if active_trades[sym] is not None:
-                        print(f"ℹ️ Position {sym} is no longer open on Binance (Triggered SL/TP or closed). Cleared from active trades.")
-                        cancel_algo_orders(sym)
-                        active_trades[sym] = None
-    except Exception as e:
-        print(f"⚠️ Could not sync existing positions from Binance: {e}")
+                    else:
+                        if active_trades[sym] is not None:
+                            print(f"ℹ️ Position {sym} is no longer open on Binance (Triggered SL/TP or closed). Cleared from active trades.")
+                            cancel_algo_orders(sym)
+                            active_trades[sym] = None
+            return  # Sync successful
+        except Exception as e:
+            err_str = str(e)
+            if attempt < retries - 1:
+                # If timestamp drift or momentary network glitch, re-sync server clock and retry
+                if '-1021' in err_str or 'Timestamp' in err_str:
+                    sync_server_time()
+                time.sleep(1.0)
+                continue
+            
+            short_err = err_str.split('\n')[0]
+            if 'GET https://' in short_err:
+                short_err = short_err.split('GET https://')[0].strip() or 'Transient network timeout'
+            print(f"ℹ️ Transient Binance position sync ping skipped ({short_err}). Will auto-retry on next cycle.")
 
 def print_portfolio_dashboard(active_trades):
     """
@@ -599,6 +833,7 @@ def manage_active_trades(active_trades, daily_loss_ref):
     Monitors all open positions using fast real-time ticker prices.
     Executes breakeven, take profit, and stop loss order closures.
     Also syncs with Binance to detect if a cloud SL/TP already triggered.
+    Accurately tracks realized loss into daily_loss for circuit breaker safety.
     Returns the updated daily_loss amount.
     """
     daily_loss = daily_loss_ref
@@ -618,10 +853,45 @@ def manage_active_trades(active_trades, daily_loss_ref):
         try:
             raw_symbol = symbol.replace('/', '')
             
-            # 1. Detect if Cloud SL/TP triggered on Binance
+            # 1. Detect if Cloud SL/TP triggered on Binance or position closed externally
             if raw_symbol in live_positions_map and live_positions_map[raw_symbol] == 0:
                 print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] ☁️ {symbol} Position closed on Binance (Cloud SL/TP executed). Cleaning up orders...")
                 cancel_algo_orders(symbol)
+                
+                # Fetch recent user trades to calculate exact realized PnL
+                realized_pnl = 0.0
+                pnl_found = False
+                try:
+                    trades = exchange.fapiPrivateGetUserTrades({'symbol': raw_symbol, 'limit': 5})
+                    closing_trades = [t for t in trades if float(t.get('realizedPnl', 0.0)) != 0]
+                    if closing_trades:
+                        realized_pnl = sum(float(t.get('realizedPnl', 0.0)) for t in closing_trades[-2:])
+                        pnl_found = True
+                except Exception:
+                    pass
+                
+                # Fallback calculation if trade history is temporarily unavailable
+                if not pnl_found and trade.get('entry') and trade.get('qty'):
+                    ticker = exchange.fapiPublicGetTickerPrice({'symbol': raw_symbol})
+                    curr_px = float(ticker['price'])
+                    if trade['side'] == 'long':
+                        realized_pnl = (curr_px - trade['entry']) * trade['qty']
+                    else:
+                        realized_pnl = (trade['entry'] - curr_px) * trade['qty']
+
+                if realized_pnl < 0:
+                    loss_amt = abs(realized_pnl)
+                    daily_loss += loss_amt
+                    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 🛑 Cloud Stop Loss Hit for {symbol}! Realized: -${loss_amt:,.2f} | Total Daily Loss: ${daily_loss:,.2f}")
+                    init_m = (trade['entry'] * trade['qty']) / DEFAULT_LEVERAGE if trade.get('entry') else 1.0
+                    pnl_pct_calc = (realized_pnl / init_m) * 100
+                    record_closed_trade(symbol, trade['side'], trade['entry'], trade.get('stop_loss', 0), trade['qty'], realized_pnl, pnl_pct_calc, "Cloud Stop Loss 🛑")
+                else:
+                    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 🎯 Cloud Take Profit / Gain Hit for {symbol}! Realized: +${realized_pnl:,.2f}")
+                    init_m = (trade['entry'] * trade['qty']) / DEFAULT_LEVERAGE if trade.get('entry') else 1.0
+                    pnl_pct_calc = (realized_pnl / init_m) * 100
+                    record_closed_trade(symbol, trade['side'], trade['entry'], trade.get('take_profit', 0), trade['qty'], realized_pnl, pnl_pct_calc, "Cloud Take Profit 🎯")
+
                 active_trades[symbol] = None
                 continue
 
@@ -642,13 +912,22 @@ def manage_active_trades(active_trades, daily_loss_ref):
                     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {symbol} ✅ TAKE PROFIT HIT at ${current_price:,.2f}! Closing trade on Binance...")
                     close_demo_trade(symbol, trade['side'], trade['qty'])
                     cancel_algo_orders(symbol)
+                    pnl_usd = (trade['take_profit'] - trade['entry']) * trade['qty']
+                    init_m = (trade['entry'] * trade['qty']) / DEFAULT_LEVERAGE
+                    pnl_pct_calc = (pnl_usd / init_m) * 100
+                    record_closed_trade(symbol, trade['side'], trade['entry'], trade['take_profit'], trade['qty'], pnl_usd, pnl_pct_calc, "Take Profit Hit 🎯")
                     active_trades[symbol] = None
                 elif current_price <= trade['stop_loss']:
-                    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {symbol} ❌ STOP LOSS HIT at ${current_price:,.2f}! Closing trade on Binance...")
+                    is_be = trade.get('breakeven_triggered', False)
+                    reason = "Breakeven Hit 🛡️" if is_be else "Stop Loss Hit 🛑"
+                    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {symbol} ❌ {reason} at ${current_price:,.2f}! Closing trade on Binance...")
                     close_demo_trade(symbol, trade['side'], trade['qty'])
                     cancel_algo_orders(symbol)
-                    loss = abs(trade['entry'] - trade['stop_loss']) * trade['qty']
+                    loss = abs(trade['entry'] - trade['stop_loss']) * trade['qty'] if not is_be else 0.0
                     daily_loss += loss
+                    init_m = (trade['entry'] * trade['qty']) / DEFAULT_LEVERAGE
+                    pnl_pct_calc = (-loss / init_m) * 100 if init_m > 0 else 0.0
+                    record_closed_trade(symbol, trade['side'], trade['entry'], trade['stop_loss'], trade['qty'], -loss, pnl_pct_calc, reason)
                     active_trades[symbol] = None
                     
             elif trade['side'] == 'short':
@@ -662,13 +941,22 @@ def manage_active_trades(active_trades, daily_loss_ref):
                     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {symbol} ✅ TAKE PROFIT HIT at ${current_price:,.2f}! Closing trade on Binance...")
                     close_demo_trade(symbol, trade['side'], trade['qty'])
                     cancel_algo_orders(symbol)
+                    pnl_usd = (trade['entry'] - trade['take_profit']) * trade['qty']
+                    init_m = (trade['entry'] * trade['qty']) / DEFAULT_LEVERAGE
+                    pnl_pct_calc = (pnl_usd / init_m) * 100
+                    record_closed_trade(symbol, trade['side'], trade['entry'], trade['take_profit'], trade['qty'], pnl_usd, pnl_pct_calc, "Take Profit Hit 🎯")
                     active_trades[symbol] = None
-                elif current_price <= trade['stop_loss']:
-                    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {symbol} ❌ STOP LOSS HIT at ${current_price:,.2f}! Closing trade on Binance...")
+                elif current_price >= trade['stop_loss']:
+                    is_be = trade.get('breakeven_triggered', False)
+                    reason = "Breakeven Hit 🛡️" if is_be else "Stop Loss Hit 🛑"
+                    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {symbol} ❌ {reason} at ${current_price:,.2f}! Closing trade on Binance...")
                     close_demo_trade(symbol, trade['side'], trade['qty'])
                     cancel_algo_orders(symbol)
-                    loss = abs(trade['stop_loss'] - trade['entry']) * trade['qty']
+                    loss = abs(trade['stop_loss'] - trade['entry']) * trade['qty'] if not is_be else 0.0
                     daily_loss += loss
+                    init_m = (trade['entry'] * trade['qty']) / DEFAULT_LEVERAGE
+                    pnl_pct_calc = (-loss / init_m) * 100 if init_m > 0 else 0.0
+                    record_closed_trade(symbol, trade['side'], trade['entry'], trade['stop_loss'], trade['qty'], -loss, pnl_pct_calc, reason)
                     active_trades[symbol] = None
         except Exception as e:
             print(f"Error checking position for {symbol}: {e}")
@@ -746,40 +1034,55 @@ def bot_loop():
                     continue
 
                 # ---------------------------------------------------------
-                # 1. 4H Key Levels & Market Structure Analysis
+                # 0. TradFi Gold (XAU/USDT) Weekend Filter
                 # ---------------------------------------------------------
+                if 'XAU' in symbol and not is_gold_market_open():
+                    print(f"[{pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}] ⏸️ TradFi Gold (XAU/USDT) is closed for the weekend (Fri 21:00 - Sun 22:00 UTC). Skipping...\n")
+                    continue
+
+                # ---------------------------------------------------------
+                # 1. 1D Macro Trend Bias & 4H Key Levels Analysis
+                # ---------------------------------------------------------
+                daily_bias = get_daily_trend_bias(symbol)
                 levels_4h = get_4h_levels_and_structure(symbol)
                 if levels_4h is None:
                     print(f"⚠️ Could not calculate 4H levels for {symbol}. Skipping...\n")
                     continue
 
                 # ---------------------------------------------------------
-                # 2. 1H Execution Timeframe Analysis
+                # 2. 1H Execution Timeframe Analysis (Evaluated on Completed Candle)
                 # ---------------------------------------------------------
                 df = fetch_data(symbol, ENTRY_TIMEFRAME, limit=250)
                 if df is None:
                     continue
                 
                 df['ema50'] = df['close'].ewm(span=50, adjust=False).mean()
-                current_close = float(df.iloc[-1]['close'])
-                ema_entry = float(df.iloc[-1]['ema50'])
                 
-                if pd.isna(ema_entry):
+                # Use completed candle to avoid false triggers from 5-second nascent candle
+                completed_candle = df.iloc[-2] if len(df) > 2 else df.iloc[-1]
+                close_completed = float(completed_candle['close'])
+                ema_completed = float(completed_candle['ema50'])
+                
+                # Live real-time market price for order sizing
+                current_close = float(df.iloc[-1]['close'])
+                
+                if pd.isna(ema_completed):
                     print(f"⚠️ Not enough data on {ENTRY_TIMEFRAME} for EMA calculation. Skipping...\n")
                     continue
 
-                ltf_uptrend = current_close > ema_entry
-                fvg = detect_fvg(df)
+                ltf_uptrend = close_completed > ema_completed
+                fvg = detect_fvg(df.iloc[:-1] if len(df) > 5 else df)
 
                 # ---------------------------------------------------------
-                # 3. 4H Levels Markdown Output
+                # 3. Multi-Timeframe Levels Output
                 # ---------------------------------------------------------
                 print(f"\n[{pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}] 🔍 Analyzing {symbol}...")
                 print(f"======================================================================")
-                print(f"📊 [4H KEY LEVELS & MARKET STRUCTURE] {symbol}")
+                print(f"📊 [INSTITUTIONAL SMC MARKET STRUCTURE] {symbol}")
                 print(f"======================================================================")
                 print(f"| Metric                     | Level / Status                       |")
                 print(f"|----------------------------|--------------------------------------|")
+                print(f"| 1D Macro Trend Bias        | {daily_bias:<36} |")
                 print(f"| 4H Structure Bias          | {levels_4h['structure_bias']:<36} |")
                 print(f"| 4H Price vs 20 EMA         | ${levels_4h['current_price']:<9,.2f} vs ${levels_4h['ema20']:<9,.2f}           |")
                 print(f"| 4H Key Support (Floor)     | ${levels_4h['nearest_support']:<35,.2f} |")
@@ -794,7 +1097,7 @@ def bot_loop():
                     print(f"| 4H Fair Value Gap          | {fvg_str:<36} |")
                 print(f"======================================================================")
                 print(f"--- [1H EXECUTION & TRIGGER CONFIRMATION] ({symbol}) ---")
-                print(f"1H Price: ${current_close:,.2f} | 1H 50 EMA: ${ema_entry:,.2f} ({'BULLISH' if ltf_uptrend else 'BEARISH'})")
+                print(f"1H Price: ${current_close:,.2f} | 1H 50 EMA: ${ema_completed:,.2f} ({'BULLISH' if ltf_uptrend else 'BEARISH'}) | 1D Macro: {daily_bias}")
                 if fvg:
                     print(f"1H FVG Status: {fvg['type'].upper()} FVG detected between ${fvg['bottom']:.2f} and ${fvg['top']:.2f}")
                 else:
@@ -805,6 +1108,11 @@ def bot_loop():
                 # 4. Confluence Entry & 4H-Level SL/TP Execution
                 # ---------------------------------------------------------
                 if fvg and active_trades[symbol] is None:
+                    # Enforce global pause toggle from dashboard
+                    if is_bot_paused():
+                        print(f"⏸️ [BOT PAUSED] Setup detected on {symbol}, but new entries are paused from Dashboard. Skipping entry.\n")
+                        continue
+
                     # Enforce global max concurrent trades limit across all symbols
                     current_open_trades = sum(1 for t in active_trades.values() if t is not None)
                     if current_open_trades >= MAX_CONCURRENT_TRADES:
@@ -812,11 +1120,40 @@ def bot_loop():
                         print(f"⏸️ Setup detected on {symbol}, but MAX_CONCURRENT_TRADES limit ({current_open_trades}/{MAX_CONCURRENT_TRADES}) reached ({', '.join(active_names)} active). Skipping new entry.\n")
                         continue
 
+                    is_mitigated = fvg.get('retested') or fvg.get('in_zone')
+                    not_overextended_long = current_close <= fvg['top'] * 1.010
+                    not_overextended_short = current_close >= fvg['bottom'] * 0.990
+
+                    # Detailed feedback if setup is forming but waiting for strict confirmation
                     if levels_4h['structure_bias'] == 'BULLISH' and ltf_uptrend and fvg['type'] == 'bullish':
-                        print(f"🚀 [SUPER CONFLUENCE] Mega Bullish 4H/1H Setup on {symbol}!")
+                        if daily_bias != 'BULLISH':
+                            print(f"⏳ [FILTERED] Bullish setup on {symbol}, but 1D Macro Trend is {daily_bias} (requires BULLISH). Trade skipped.")
+                        elif not is_mitigated:
+                            print(f"⏳ [WAITING RETEST] Bullish 1H FVG on {symbol} [${fvg['bottom']:,.2f}-${fvg['top']:,.2f}], but price hasn't retested/pulled back yet. Trade skipped.")
+                        elif not not_overextended_long:
+                            print(f"⏳ [OVEREXTENDED] Price ${current_close:,.2f} is extended >1.0% above 1H FVG top (${fvg['top']:,.2f}). Trade skipped.")
+
+                    elif levels_4h['structure_bias'] == 'BEARISH' and not ltf_uptrend and fvg['type'] == 'bearish':
+                        if daily_bias != 'BEARISH':
+                            print(f"⏳ [FILTERED] Bearish setup on {symbol}, but 1D Macro Trend is {daily_bias} (requires BEARISH). Trade skipped.")
+                        elif not is_mitigated:
+                            print(f"⏳ [WAITING RETEST] Bearish 1H FVG on {symbol} [${fvg['bottom']:,.2f}-${fvg['top']:,.2f}], but price hasn't retested/pulled back yet. Trade skipped.")
+                        elif not not_overextended_short:
+                            print(f"⏳ [OVEREXTENDED] Price ${current_close:,.2f} is extended >1.0% below 1H FVG bottom (${fvg['bottom']:,.2f}). Trade skipped.")
+
+                    # Long Confluence: 1D strictly Bullish + 4H Bullish + 1H Uptrend + Bullish FVG Retest
+                    if levels_4h['structure_bias'] == 'BULLISH' and ltf_uptrend and fvg['type'] == 'bullish' and not_overextended_long and daily_bias == 'BULLISH' and is_mitigated:
+                        print(f"🎯 [SMC MITIGATION CONFIRMED] Price pulled back into 1H FVG (${fvg['bottom']:,.2f} - ${fvg['top']:,.2f}) with bullish rejection!")
+                        print(f"🚀 [TRIPLE TIMEFRAME CONFLUENCE] 1D Bullish + 4H Bullish + 1H FVG Retest on {symbol}!")
                         
                         entry_price = current_close
                         stop_loss, take_profit, dynamic_rr, anchor_sup, anchor_res = calculate_4h_level_sl_tp(levels_4h, entry_price, 'long', fvg)
+                        
+                        # Minimum Risk-to-Reward Gate (1:1.5 minimum)
+                        if dynamic_rr < 1.5:
+                            print(f"⚠️ [POOR R:R] Setup on {symbol} yields R:R 1:{dynamic_rr:.2f} (< 1:1.5 required). Skipping trade for capital preservation.\n")
+                            continue
+
                         qty = calculate_quantity(entry_price, stop_loss, current_capital, RISK_PER_TRADE, symbol)
                         
                         print(f"🟢 [4H LEVEL-BASED TRADE PLAN]")
@@ -838,14 +1175,23 @@ def bot_loop():
                             }
                             # Place Native Binance Server-Side Cloud SL and TP Orders
                             place_server_sl_tp(symbol, 'long', stop_loss, take_profit)
+                            log_bot_event(f"🚀 ENTERED LONG on {symbol} @ ${entry_price:,.2f} | Qty: {qty} | SL: ${stop_loss:,.2f} | TP: ${take_profit:,.2f}", "TRADE")
                         else:
                             print(f"⚠️ Trade setup identified but order execution failed on Binance for {symbol}.")
                         
-                    elif levels_4h['structure_bias'] == 'BEARISH' and not ltf_uptrend and fvg['type'] == 'bearish':
-                        print(f"📉 [SUPER CONFLUENCE] Mega Bearish 4H/1H Setup on {symbol}!")
+                    # Short Confluence: 1D strictly Bearish + 4H Bearish + 1H Downtrend + Bearish FVG Retest
+                    elif levels_4h['structure_bias'] == 'BEARISH' and not ltf_uptrend and fvg['type'] == 'bearish' and not_overextended_short and daily_bias == 'BEARISH' and is_mitigated:
+                        print(f"🎯 [SMC MITIGATION CONFIRMED] Price pulled back into 1H FVG (${fvg['bottom']:,.2f} - ${fvg['top']:,.2f}) with bearish rejection!")
+                        print(f"📉 [TRIPLE TIMEFRAME CONFLUENCE] 1D Bearish + 4H Bearish + 1H FVG Retest on {symbol}!")
                         
                         entry_price = current_close
                         stop_loss, take_profit, dynamic_rr, anchor_res, anchor_sup = calculate_4h_level_sl_tp(levels_4h, entry_price, 'short', fvg)
+                        
+                        # Minimum Risk-to-Reward Gate (1:1.5 minimum)
+                        if dynamic_rr < 1.5:
+                            print(f"⚠️ [POOR R:R] Setup on {symbol} yields R:R 1:{dynamic_rr:.2f} (< 1:1.5 required). Skipping trade for capital preservation.\n")
+                            continue
+
                         qty = calculate_quantity(entry_price, stop_loss, current_capital, RISK_PER_TRADE, symbol)
                         
                         print(f"🔴 [4H LEVEL-BASED TRADE PLAN]")
@@ -867,11 +1213,12 @@ def bot_loop():
                             }
                             # Place Native Binance Server-Side Cloud SL and TP Orders
                             place_server_sl_tp(symbol, 'short', stop_loss, take_profit)
+                            log_bot_event(f"📉 ENTERED SHORT on {symbol} @ ${entry_price:,.2f} | Qty: {qty} | SL: ${stop_loss:,.2f} | TP: ${take_profit:,.2f}", "TRADE")
                         else:
                             print(f"⚠️ Trade setup identified but order execution failed on Binance for {symbol}.")
 
             # ---------------------------------------------------------
-            # 2. Smart Sleep Logic (Sleeps until the next 1-Hour candle closes)
+            # 2. Smart Responsive Sleep & Trade Monitoring Loop
             # ---------------------------------------------------------
             now_utc = datetime.now(timezone.utc)
             next_hour_utc = (now_utc + timedelta(hours=1)).replace(minute=0, second=5, microsecond=0)
@@ -879,32 +1226,32 @@ def bot_loop():
             wake_time_local = datetime.now() + timedelta(seconds=total_sleep)
             
             has_active_trades = any(trade is not None for trade in active_trades.values())
-            
             if not has_active_trades:
-                print(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 💤 No open trades. Sleeping for {total_sleep/60:.2f} minutes until {wake_time_local.strftime('%I:%M:%S %p')} Local Time (Exact Candle Close)...")
-                time.sleep(total_sleep)
+                print(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 💤 No open trades. Waiting {total_sleep/60:.2f} mins until {wake_time_local.strftime('%I:%M:%S %p')} Local Time (Candle Close)...")
             else:
                 active_syms = [s for s, t in active_trades.items() if t is not None]
-                print(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 💤 Active positions running: {', '.join(active_syms)} ({len(active_syms)}/{MAX_CONCURRENT_TRADES}). Monitoring positions quietly until next candle close at {wake_time_local.strftime('%I:%M:%S %p')} ({total_sleep/60:.2f} mins)...")
-                
-                # During the hour, monitor open trades every 30s without spamming full market analysis!
-                monitor_ticks = 0
-                while True:
-                    now_utc = datetime.now(timezone.utc)
-                    remaining = (next_hour_utc - now_utc).total_seconds()
-                    if remaining <= 0:
-                        break
-                    time.sleep(min(30.0, remaining))
+                print(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 💤 Active positions running: {', '.join(active_syms)} ({len(active_syms)}/{MAX_CONCURRENT_TRADES}). Monitoring until next candle close at {wake_time_local.strftime('%I:%M:%S %p')} ({total_sleep/60:.2f} mins)...")
+
+            # Responsive monitoring loop: checks in 15-second slices instead of freezing
+            last_sync_time = time.time()
+            while True:
+                now_utc = datetime.now(timezone.utc)
+                remaining = (next_hour_utc - now_utc).total_seconds()
+                if remaining <= 0:
+                    break
+
+                time.sleep(min(15.0, remaining))
+
+                # If we have active trades, monitor SL/TP & breakeven
+                if any(trade is not None for trade in active_trades.values()):
                     daily_loss = manage_active_trades(active_trades, daily_loss)
-                    monitor_ticks += 1
-                    # Quietly monitors positions every 30s without cluttering the console output
-                    
-                    # If all trades were closed, wait out the remaining candle time
-                    if not any(t is not None for t in active_trades.values()):
-                        remaining_mins = max(0.0, (next_hour_utc - datetime.now(timezone.utc)).total_seconds() / 60)
-                        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 💤 All trades closed. Waiting {remaining_mins:.2f} mins for next candle close at {wake_time_local.strftime('%I:%M:%S %p')}...")
-                        time.sleep(max(0.0, (next_hour_utc - datetime.now(timezone.utc)).total_seconds()))
-                        break
+                else:
+                    # Periodically (every 60s) sync in case user manually opened an order on Binance
+                    if time.time() - last_sync_time >= 60.0:
+                        sync_active_positions(active_trades)
+                        last_sync_time = time.time()
+                        if any(trade is not None for trade in active_trades.values()):
+                            daily_loss = manage_active_trades(active_trades, daily_loss)
             
         except Exception as e:
             print(f"Error in main loop: {e}")
